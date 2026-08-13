@@ -1,0 +1,8 @@
+{
+  "task_id": "REQ-20260813-001",
+  "title": "用户列表页面需要支持搜索",
+  "description": "当前用户列表没有搜索功能，需要添加关键词搜索。",
+  "priority": "high",
+  "module": "用户管理",
+  "source": "demo"
+}

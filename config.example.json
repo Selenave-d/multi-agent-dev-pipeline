@@ -1,0 +1,32 @@
+{
+  "project": {
+    "name": "内部管理系统",
+    "root": "examples/sample_project",
+    "tech_stack": {
+      "framework": "Vue 2",
+      "language": "JavaScript",
+      "ui_library": "Element UI",
+      "build_tool": "webpack"
+    },
+    "directories": {
+      "src": "src/",
+      "views": "src/views/",
+      "components": "src/components/",
+      "api": "src/api/"
+    },
+    "conventions": {
+      "indent": 2,
+      "quotes": "single",
+      "semicolon": true
+    }
+  },
+  "pipeline": {
+    "runs_dir": "runs",
+    "stop_after": "review",
+    "max_retries": 1
+  },
+  "providers": {
+    "model": "demo",
+    "requirement": "file"
+  }
+}
