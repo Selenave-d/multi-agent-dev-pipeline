@@ -21,7 +21,14 @@ class Orchestrator:
         self.agents = agents
         self.max_retries = max(0, max_retries)
 
-    def run(self, reference: str, task_id: str, *, resume: bool = False) -> RunState:
+    def run(
+        self,
+        reference: str,
+        task_id: str,
+        *,
+        resume: bool = False,
+        metadata: dict[str, Any] | None = None,
+    ) -> RunState:
         state = self.store.load_or_create(task_id)
         if state.completed_stages and not resume:
             raise PipelineError(
@@ -30,6 +37,8 @@ class Orchestrator:
             )
         state.status = "running"
         state.error = None
+        state.metadata.update(metadata or {})
+        state.metadata["reference"] = reference
         self.store.save_state(state)
 
         context: dict[str, Any] = {"reference": reference}
@@ -44,6 +53,31 @@ class Orchestrator:
 
         state.status = "awaiting_human_review"
         state.current_stage = None
+        self.store.save_state(state)
+        return state
+
+    def revise(self, task_id: str, feedback: dict[str, Any]) -> RunState:
+        state = self.store.load_or_create(task_id)
+        if state.status != "needs_revision":
+            raise PipelineError(
+                f"Run '{task_id}' is '{state.status}', expected 'needs_revision'",
+                code="invalid_state_transition",
+            )
+        context = {
+            stage: self.store.load_artifact(state, stage)
+            for stage in ("requirement", "analysis")
+        }
+        context["revision_feedback"] = feedback
+        state.completed_stages = [
+            stage for stage in state.completed_stages if stage not in {"development", "review"}
+        ]
+        state.status = "revising"
+        state.error = None
+        self.store.save_state(state)
+        for stage in ("development", "review"):
+            self._execute_stage(stage, context, state)
+            context[stage] = self.store.load_artifact(state, stage)
+        state.status = "awaiting_human_review"
         self.store.save_state(state)
         return state
 

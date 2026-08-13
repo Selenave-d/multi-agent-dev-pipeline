@@ -26,6 +26,28 @@
 
 每个阶段可设置 `command`、`model`、`timeout_seconds`。`project.root` 必须指向待分析的真实业务仓库。
 
+执行配置：
+
+```json
+{
+  "pipeline": {
+    "runs_dir": "runs",
+    "worktree_dir": "runs",
+    "command_timeout_seconds": 1200,
+    "commands": {
+      "lint": "npm run lint",
+      "test": "npm run test",
+      "build": "npm run build"
+    }
+  }
+}
+```
+
+- `worktree_dir` 必须与 `runs_dir` 指向同一目录；每个任务实际使用 `<worktree_dir>/<task_id>/worktree`。
+- 命令按 lint、test、build 顺序执行，失败即停止，stdout/stderr 写入 `06_verification.json`。
+- 某项无需执行时设置为 `null`，记录为 `skipped`。
+- `approve` 前要求目标仓库干净且位于普通分支；`merge` 前再次检查主分支和基准提交没有变化。
+
 ## 凭据
 
 禅道推荐使用用户级 `~/.zentao.json`：
@@ -56,6 +78,10 @@ codex login
 ```powershell
 dev-pipeline --config config.json --requirement story:123
 dev-pipeline --config config.json --requirement bug:456
+dev-pipeline status --config config.json
+dev-pipeline approve --config config.json --task-id STORY-123
+dev-pipeline revise --config config.json --task-id STORY-123
+dev-pipeline merge --config config.json --task-id STORY-123
 ```
 
 离线回归：
@@ -72,4 +98,8 @@ dev-pipeline --config config.demo.json --requirement examples/requirement.json
 - `zentao_auth_failed`：确认 `key` 是 API 应用签名密钥，不是网页登录密码；检查服务器时间差。
 - `zentao_unreachable`：确认 VPN、代理、内网 DNS 和 `base_url`。
 - 已有失败运行：修复问题后使用 `--resume`；Pipeline 会校验并复用已完成阶段。
+- `project_dirty`：批准前目标仓库有未提交改动，先处理这些改动，避免 worktree 基准不明确。
+- `base_commit_changed`：批准后主分支发生变化；当前实现拒绝直接合并，需在新基准上重新执行。
+- `git_command_failed`：检查 `changes.patch`、Git 输出和目标文件是否与分析时一致。
+- `needs_revision`：运行 `revise`，验证错误和 `06_verification.json` 会传回开发 Agent。
 - Review 与开发不应共用隐式会话。当前所有 CLI 调用都是新会话，并显式传递 JSON 产物。

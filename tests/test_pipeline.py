@@ -115,3 +115,32 @@ def test_task_id_cannot_escape_runs_directory(tmp_path: Path) -> None:
     store = RunStore(tmp_path / "runs")
     with pytest.raises(ValidationError, match="task_id"):
         store.run_dir("../outside")
+
+
+class RevisionModel(DemoModelClient):
+    def __init__(self) -> None:
+        self.feedback = None
+
+    def generate(self, stage, payload):
+        if stage == "development":
+            self.feedback = payload.get("revision_feedback")
+        return super().generate(stage, payload)
+
+
+def test_revise_passes_failure_feedback_to_development_agent(tmp_path: Path) -> None:
+    requirement = tmp_path / "requirement.json"
+    write_requirement(requirement)
+    store = RunStore(tmp_path / "runs")
+    model = RevisionModel()
+    orchestrator = Orchestrator(store, make_agents(model))
+    state = orchestrator.run(str(requirement), TASK_ID)
+    state.status = "needs_revision"
+    state.error = {"stage": "verification", "message": "tests failed"}
+    store.save_state(state)
+
+    revised = orchestrator.revise(TASK_ID, {"error": state.error})
+
+    assert revised.status == "awaiting_human_review"
+    assert model.feedback == {"error": state.error}
+    assert revised.attempts["development"] == 2
+    assert revised.attempts["review"] == 2

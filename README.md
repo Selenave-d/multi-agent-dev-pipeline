@@ -47,6 +47,32 @@ runs/REQ-20260813-001/
 └── run_state.json
 ```
 
+人工确认并执行：
+
+```powershell
+dev-pipeline status --config config.json
+dev-pipeline approve --config config.json --task-id REQ-20260813-001
+# approve 会展示 Review 摘要并等待 y/N；批准后创建隔离 worktree、应用补丁、运行验证
+dev-pipeline merge --config config.json --task-id REQ-20260813-001
+```
+
+打回或验证失败后的修订：
+
+```powershell
+dev-pipeline reject --config config.json --task-id REQ-20260813-001
+dev-pipeline revise --config config.json --task-id REQ-20260813-001
+```
+
+状态流：
+
+```text
+awaiting_human_review
+  ├─ reject  → rejected
+  └─ approve → approved → apply/verify
+                         ├─ failed → needs_revision → revise → awaiting_human_review
+                         └─ passed → ready_to_merge → merge → merged
+```
+
 若进程在某阶段失败，修复配置或服务后继续：
 
 ```powershell
@@ -93,12 +119,13 @@ class ModelClient(Protocol):
 
 - 分析阶段只读取受限目录树；开发阶段只读取分析结果点名且在大小限制内的 UTF-8 文件。
 - 不执行模型返回的命令或 diff。
-- 不自动提交、推送或合并 Git 分支。
+- 只有人工 `approve` 后才在隔离 worktree 应用 diff 和运行配置命令。
+- 只有人工 `merge` 后才提交任务分支并 `--no-ff` 合并；不自动推送远程。
 - 不把 API 密钥写入 JSON 产物。
 - 禅道写回、人工批准和 Git Agent 留到下一阶段实现。
 
 ## 下一阶段
 
-1. 增加人工决策产物 `05_decision.json`，批准后才能进入 Git Agent。
-2. 在隔离 worktree 应用补丁并运行项目级 lint/test；仍不直接合并主分支。
-3. 根据真实项目补充更严格的 JSON Schema 和文件访问白名单。
+1. 根据真实项目补充更严格的 JSON Schema 和文件访问白名单。
+2. 增加 apply 失败的结构化反馈和自动补丁修复策略。
+3. 增加合并后的远程推送/PR 人工门禁。

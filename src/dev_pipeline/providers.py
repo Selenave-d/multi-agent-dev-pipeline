@@ -477,6 +477,7 @@ class ClaudeCodeClient(CodingClientBase):
             "analysis": payload["analysis"],
             "source_files": self.project.read_files(affected),
             "project": self.project.project_config,
+            "revision_feedback": payload.get("revision_feedback"),
         }
         prompt = (
             "你是代码开发 Agent。按照已批准的分析方案生成 unified diff。"

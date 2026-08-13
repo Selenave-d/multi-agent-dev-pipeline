@@ -5,7 +5,13 @@
   },
   "pipeline": {
     "runs_dir": "runs",
-    "max_retries": 1
+    "worktree_dir": "runs",
+    "max_retries": 1,
+    "commands": {
+      "lint": null,
+      "test": null,
+      "build": null
+    }
   },
   "providers": {
     "requirement": {"type": "file"},

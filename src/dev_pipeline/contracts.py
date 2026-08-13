@@ -13,6 +13,8 @@ ARTIFACT_NAMES = {
     "development": "03_code_changes.json",
     "review": "04_review.json",
 }
+DECISION_ARTIFACT = "05_decision.json"
+VERIFICATION_ARTIFACT = "06_verification.json"
 
 
 def utc_now() -> str:
@@ -55,6 +57,7 @@ class RunState:
     attempts: dict[str, int] = field(default_factory=dict)
     artifacts: dict[str, dict[str, str]] = field(default_factory=dict)
     error: dict[str, Any] | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
     created_at: str = field(default_factory=utc_now)
     updated_at: str = field(default_factory=utc_now)
 
@@ -67,11 +70,20 @@ class RunState:
             "attempts": self.attempts,
             "artifacts": self.artifacts,
             "error": self.error,
+            "metadata": self.metadata,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> RunState:
-        require_fields(data, "task_id", "status", "completed_stages", "attempts", "artifacts")
-        return cls(**{key: data.get(key) for key in cls.__dataclass_fields__})
+        require_fields(data, "task_id", "status")
+        for field_name, expected_type in (
+            ("completed_stages", list),
+            ("attempts", dict),
+            ("artifacts", dict),
+        ):
+            if field_name not in data or not isinstance(data[field_name], expected_type):
+                raise ValidationError(f"Run state field '{field_name}' has an invalid type")
+        values = {key: data[key] for key in cls.__dataclass_fields__ if key in data}
+        return cls(**values)

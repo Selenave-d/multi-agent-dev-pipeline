@@ -8,6 +8,7 @@ from typing import Any
 
 from .agents import ModelAgent, RequirementAgent
 from .errors import PipelineError, ValidationError
+from .execution import WorktreeExecutor
 from .orchestrator import Orchestrator, resolve_runs_dir
 from .providers import (
     ClaudeCodeClient,
@@ -19,6 +20,9 @@ from .providers import (
     ZenTaoRequirementSource,
 )
 from .storage import RunStore
+
+COMMANDS = {"run", "approve", "reject", "status", "revise", "merge"}
+TERMINAL_STATUSES = {"merged", "rejected"}
 
 
 def load_config(path: Path) -> dict[str, Any]:
@@ -121,53 +125,186 @@ def build_agents(config: dict[str, Any], config_path: Path) -> dict[str, Any]:
     }
 
 
+def add_config_argument(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--config", default="config.json", help="Path to pipeline config JSON")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run the multi-agent development pipeline")
-    parser.add_argument("--config", default="config.json", help="Path to pipeline config JSON")
-    parser.add_argument(
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    run = subparsers.add_parser("run", help="Run requirement through analysis, development, review")
+    add_config_argument(run)
+    run.add_argument(
         "--requirement",
         required=True,
         help="Requirement file path or ZenTao reference such as story:123 / bug:123",
     )
-    parser.add_argument("--task-id", help="Task ID; defaults to requirement.task_id")
-    parser.add_argument("--resume", action="store_true", help="Resume a prior interrupted run")
+    run.add_argument("--task-id", help="Task ID; defaults to requirement.task_id")
+    run.add_argument("--resume", action="store_true", help="Resume a prior interrupted run")
+
+    for name in ("approve", "reject", "revise", "merge"):
+        command = subparsers.add_parser(name)
+        add_config_argument(command)
+        command.add_argument("--task-id", required=True)
+    status = subparsers.add_parser("status")
+    add_config_argument(status)
+    status.add_argument("--all", action="store_true", help="Include merged and rejected tasks")
     return parser
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
-    try:
-        config_path = Path(args.config).resolve()
-        config = load_config(config_path)
-        providers = config.get("providers", {})
-        requirement_config = providers.get("requirement", {})
-        is_legacy = isinstance(requirement_config, str)
-        requirement_type = (
-            requirement_config if is_legacy else requirement_config.get("type", "file")
-        )
-        reference = args.requirement
-        if requirement_type == "file":
-            reference = str(Path(reference).resolve())
-            raw_requirement = RunStore.read_json(Path(reference))
-            inferred_task_id = raw_requirement.get("task_id")
-        elif requirement_type == "zentao":
-            inferred_task_id = ZenTaoRequirementSource.task_id_for(reference)
-        else:
-            inferred_task_id = None
-        task_id = args.task_id or inferred_task_id
-        if not task_id:
-            raise ValidationError("Requirement must contain task_id or use --task-id")
+def normalize_argv(argv: list[str] | None) -> list[str]:
+    values = list(sys.argv[1:] if argv is None else argv)
+    if values and values[0] not in COMMANDS and values[0] not in {"-h", "--help"}:
+        values.insert(0, "run")
+    return values
 
-        agents = build_agents(config, config_path)
-        pipeline_config = config.get("pipeline", {})
-        runs_dir = resolve_runs_dir(config_path, pipeline_config.get("runs_dir", "runs"))
-        orchestrator = Orchestrator(
-            RunStore(runs_dir),
-            agents,
-            max_retries=int(pipeline_config.get("max_retries", 1)),
+
+def load_runtime(args: argparse.Namespace) -> tuple[Path, dict[str, Any], RunStore]:
+    config_path = Path(args.config).resolve()
+    config = load_config(config_path)
+    pipeline_config = config.get("pipeline", {})
+    runs_dir = resolve_runs_dir(config_path, pipeline_config.get("runs_dir", "runs"))
+    return config_path, config, RunStore(runs_dir)
+
+
+def build_executor(
+    config_path: Path,
+    config: dict[str, Any],
+    store: RunStore,
+) -> WorktreeExecutor:
+    pipeline = config.get("pipeline", {})
+    project_root = resolve_path(config_path, config.get("project", {}).get("root", "."))
+    worktree_root = resolve_path(
+        config_path,
+        pipeline.get("worktree_dir", pipeline.get("runs_dir", "runs")),
+    )
+    commands = pipeline.get("commands", {})
+    return WorktreeExecutor(
+        store,
+        project_root,
+        worktree_root,
+        {
+            "lint": commands.get("lint", "npm run lint"),
+            "test": commands.get("test", "npm run test"),
+            "build": commands.get("build", "npm run build"),
+        },
+        command_timeout=int(pipeline.get("command_timeout_seconds", 1200)),
+    )
+
+
+def infer_requirement(
+    config: dict[str, Any],
+    reference: str,
+) -> tuple[str, str | None]:
+    requirement_config = config.get("providers", {}).get("requirement", {})
+    is_legacy = isinstance(requirement_config, str)
+    requirement_type = requirement_config if is_legacy else requirement_config.get("type", "file")
+    if requirement_type == "file":
+        resolved = str(Path(reference).resolve())
+        return resolved, RunStore.read_json(Path(resolved)).get("task_id")
+    if requirement_type == "zentao":
+        return reference, ZenTaoRequirementSource.task_id_for(reference)
+    return reference, None
+
+
+def run_command(args: argparse.Namespace) -> dict[str, Any]:
+    config_path, config, store = load_runtime(args)
+    reference, inferred_task_id = infer_requirement(config, args.requirement)
+    task_id = args.task_id or inferred_task_id
+    if not task_id:
+        raise ValidationError("Requirement must contain task_id or use --task-id")
+    pipeline = config.get("pipeline", {})
+    orchestrator = Orchestrator(
+        store,
+        build_agents(config, config_path),
+        max_retries=int(pipeline.get("max_retries", 1)),
+    )
+    state = orchestrator.run(
+        reference,
+        task_id,
+        resume=args.resume,
+        metadata={"config_path": str(config_path)},
+    )
+    return state.to_dict()
+
+
+def approve_command(args: argparse.Namespace) -> dict[str, Any]:
+    config_path, config, store = load_runtime(args)
+    state = store.load_or_create(args.task_id)
+    review = store.load_artifact(state, "review")
+    print(f"Task: {state.task_id}")
+    print(f"Review: {review['review_result']}")
+    print(f"Summary: {review['summary']}")
+    print(f"Issues: {len(review['issues'])}")
+    if input("Approve and apply this patch? [y/N] ").strip().lower() not in {"y", "yes"}:
+        return {"task_id": state.task_id, "status": state.status, "confirmed": False}
+    return build_executor(config_path, config, store).approve(state).to_dict()
+
+
+def reject_command(args: argparse.Namespace) -> dict[str, Any]:
+    config_path, config, store = load_runtime(args)
+    state = store.load_or_create(args.task_id)
+    return build_executor(config_path, config, store).reject(state).to_dict()
+
+
+def revise_command(args: argparse.Namespace) -> dict[str, Any]:
+    config_path, config, store = load_runtime(args)
+    state = store.load_or_create(args.task_id)
+    feedback = {"error": state.error}
+    if "verification" in state.artifacts:
+        feedback["verification"] = store.load_artifact(state, "verification")
+    executor = build_executor(config_path, config, store)
+    executor.cleanup_for_revision(state)
+    pipeline = config.get("pipeline", {})
+    orchestrator = Orchestrator(
+        store,
+        build_agents(config, config_path),
+        max_retries=int(pipeline.get("max_retries", 1)),
+    )
+    return orchestrator.revise(args.task_id, feedback).to_dict()
+
+
+def merge_command(args: argparse.Namespace) -> dict[str, Any]:
+    config_path, config, store = load_runtime(args)
+    state = store.load_or_create(args.task_id)
+    return build_executor(config_path, config, store).merge(state).to_dict()
+
+
+def status_command(args: argparse.Namespace) -> list[dict[str, Any]]:
+    _, _, store = load_runtime(args)
+    states = store.list_states()
+    if not args.all:
+        states = [state for state in states if state.status not in TERMINAL_STATUSES]
+    rows = []
+    for state in states:
+        progress = f"{len(state.completed_stages)}/4"
+        print(f"{state.task_id:<24} {state.status:<24} {progress:<6} {state.updated_at}")
+        rows.append(
+            {
+                "task_id": state.task_id,
+                "status": state.status,
+                "progress": progress,
+                "updated_at": state.updated_at,
+            }
         )
-        state = orchestrator.run(reference, task_id, resume=args.resume)
-        print(json.dumps(state.to_dict(), ensure_ascii=False, indent=2))
+    return rows
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(normalize_argv(argv))
+    try:
+        handlers = {
+            "run": run_command,
+            "approve": approve_command,
+            "reject": reject_command,
+            "status": status_command,
+            "revise": revise_command,
+            "merge": merge_command,
+        }
+        result = handlers[args.command](args)
+        if args.command != "status":
+            print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
     except PipelineError as exc:
         error = json.dumps({"error": exc.code, "message": str(exc)}, ensure_ascii=False)

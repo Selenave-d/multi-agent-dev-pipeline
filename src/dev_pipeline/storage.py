@@ -60,6 +60,12 @@ class RunStore:
         path = self.state_path(task_id)
         return RunState.from_dict(self.read_json(path)) if path.exists() else RunState(task_id)
 
+    def list_states(self) -> list[RunState]:
+        states: list[RunState] = []
+        for path in sorted(self.runs_dir.glob("*/run_state.json")):
+            states.append(RunState.from_dict(self.read_json(path)))
+        return sorted(states, key=lambda state: state.updated_at, reverse=True)
+
     def save_state(self, state: RunState) -> None:
         state.updated_at = utc_now()
         self.write_json(self.state_path(state.task_id), state.to_dict())
