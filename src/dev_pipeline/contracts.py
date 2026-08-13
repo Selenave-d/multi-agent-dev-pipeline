@@ -42,10 +42,28 @@ def validate_artifact(stage: str, data: dict[str, Any], task_id: str | None = No
     stage_fields = {
         "requirement": ("title", "description", "priority", "module"),
         "analysis": ("analysis",),
-        "development": ("changes", "commit_message"),
+        "development": ("change_status", "commit_message"),
         "review": ("review_result", "issues", "summary"),
     }
     require_fields(data, *stage_fields[stage])
+    if stage == "analysis":
+        analysis = data["analysis"]
+        if not isinstance(analysis, dict):
+            raise ValidationError("'analysis' must be an object")
+        change_status = analysis.get("change_status")
+        if change_status not in {"already_satisfied", "changes_required"}:
+            raise ValidationError(f"Unknown analysis change_status: {change_status}")
+    if stage == "development":
+        changes = data.get("changes")
+        if not isinstance(changes, list):
+            raise ValidationError("Development 'changes' must be an array")
+        change_status = data["change_status"]
+        if change_status == "already_satisfied" and changes:
+            raise ValidationError("already_satisfied development must have no changes")
+        if change_status == "changes_required" and not changes:
+            raise ValidationError("changes_required development must contain changes")
+        if change_status not in {"already_satisfied", "changes_required"}:
+            raise ValidationError(f"Unknown development change_status: {change_status}")
 
 
 @dataclass

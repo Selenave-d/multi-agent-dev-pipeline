@@ -93,3 +93,9 @@ class RunStore:
         if checksum != metadata["sha256"]:
             raise ValidationError(f"Checksum mismatch for stage '{stage}'")
         return data
+
+    def remove_artifact(self, state: RunState, stage: str) -> None:
+        metadata = state.artifacts.pop(stage, None)
+        if metadata:
+            (self.run_dir(state.task_id) / metadata["file"]).unlink(missing_ok=True)
+        self.save_state(state)

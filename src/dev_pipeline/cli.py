@@ -10,6 +10,7 @@ from .agents import ModelAgent, RequirementAgent
 from .errors import PipelineError, ValidationError
 from .execution import WorktreeExecutor
 from .orchestrator import Orchestrator, resolve_runs_dir
+from .patches import PatchValidator
 from .providers import (
     ClaudeCodeClient,
     DemoModelClient,
@@ -22,7 +23,7 @@ from .providers import (
 from .storage import RunStore
 
 COMMANDS = {"run", "approve", "reject", "status", "revise", "merge"}
-TERMINAL_STATUSES = {"merged", "rejected"}
+TERMINAL_STATUSES = {"merged", "rejected", "no_changes_needed"}
 
 
 def load_config(path: Path) -> dict[str, Any]:
@@ -209,6 +210,20 @@ def infer_requirement(
     return reference, None
 
 
+def build_development_validator(
+    config: dict[str, Any],
+    config_path: Path,
+) -> PatchValidator | None:
+    providers = config.get("providers", {})
+    if providers.get("model") == "demo":
+        return None
+    development_type = providers.get("development", {}).get("type", "demo")
+    if development_type == "demo":
+        return None
+    project_root = resolve_path(config_path, config.get("project", {}).get("root", "."))
+    return PatchValidator(project_root)
+
+
 def run_command(args: argparse.Namespace) -> dict[str, Any]:
     config_path, config, store = load_runtime(args)
     reference, inferred_task_id = infer_requirement(config, args.requirement)
@@ -220,6 +235,7 @@ def run_command(args: argparse.Namespace) -> dict[str, Any]:
         store,
         build_agents(config, config_path),
         max_retries=int(pipeline.get("max_retries", 1)),
+        development_validator=build_development_validator(config, config_path),
     )
     state = orchestrator.run(
         reference,
@@ -262,6 +278,7 @@ def revise_command(args: argparse.Namespace) -> dict[str, Any]:
         store,
         build_agents(config, config_path),
         max_retries=int(pipeline.get("max_retries", 1)),
+        development_validator=build_development_validator(config, config_path),
     )
     return orchestrator.revise(args.task_id, feedback).to_dict()
 

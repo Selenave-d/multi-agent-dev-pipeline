@@ -16,10 +16,12 @@ class Orchestrator:
         agents: dict[str, BaseAgent],
         *,
         max_retries: int = 1,
+        development_validator: Any | None = None,
     ) -> None:
         self.store = store
         self.agents = agents
         self.max_retries = max(0, max_retries)
+        self.development_validator = development_validator
 
     def run(
         self,
@@ -47,9 +49,14 @@ class Orchestrator:
                 artifact = self.store.load_artifact(state, stage)
                 validate_artifact(stage, artifact, task_id)
                 context[stage] = artifact
-                continue
-            self._execute_stage(stage, context, state)
-            context[stage] = self.store.load_artifact(state, stage)
+            else:
+                self._execute_stage(stage, context, state)
+                context[stage] = self.store.load_artifact(state, stage)
+            if stage == "development" and self._is_already_satisfied(context[stage]):
+                state.status = "no_changes_needed"
+                state.current_stage = None
+                self.store.save_state(state)
+                return state
 
         state.status = "awaiting_human_review"
         state.current_stage = None
@@ -71,15 +78,25 @@ class Orchestrator:
         state.completed_stages = [
             stage for stage in state.completed_stages if stage not in {"development", "review"}
         ]
+        self.store.remove_artifact(state, "review")
         state.status = "revising"
         state.error = None
         self.store.save_state(state)
         for stage in ("development", "review"):
             self._execute_stage(stage, context, state)
             context[stage] = self.store.load_artifact(state, stage)
+            if stage == "development" and self._is_already_satisfied(context[stage]):
+                state.status = "no_changes_needed"
+                state.current_stage = None
+                self.store.save_state(state)
+                return state
         state.status = "awaiting_human_review"
         self.store.save_state(state)
         return state
+
+    @staticmethod
+    def _is_already_satisfied(development: dict[str, Any]) -> bool:
+        return development.get("change_status") == "already_satisfied"
 
     def _execute_stage(self, stage: str, context: dict[str, Any], state: RunState) -> None:
         agent = self.agents[stage]
@@ -92,6 +109,8 @@ class Orchestrator:
             try:
                 artifact = agent.execute(context)
                 validate_artifact(stage, artifact, state.task_id)
+                if stage == "development" and self.development_validator:
+                    self.development_validator.validate(artifact)
                 self.store.save_artifact(state, stage, ARTIFACT_NAMES[stage], artifact)
                 state.completed_stages.append(stage)
                 state.current_stage = None
@@ -100,6 +119,11 @@ class Orchestrator:
                 return
             except Exception as exc:  # boundary: adapters may raise arbitrary SDK errors
                 last_error = exc
+                if stage == "development":
+                    context["development_validation_feedback"] = {
+                        "type": type(exc).__name__,
+                        "message": str(exc),
+                    }
         state.status = "failed"
         state.error = {
             "stage": stage,

@@ -1,8 +1,8 @@
 ## 活跃任务
 
-- id: config-template-drift
+- id: development-quality-gate
 - type: bug
-- title: 增加禅道产品归属闸门
+- title: 增加无需修改判断和 diff 有效性校验
 - current_stage: done
-- diagnosis_file: docs/debug/zentao-product-gate-diagnosis.md
-- plan_file: docs/plans/zentao-product-gate-fix-plan.md
+- diagnosis_file: docs/debug/development-quality-gate-diagnosis.md
+- plan_file: docs/plans/development-quality-gate-fix-plan.md

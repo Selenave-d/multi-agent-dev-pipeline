@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -9,6 +10,7 @@ from dev_pipeline.agents import ModelAgent, RequirementAgent
 from dev_pipeline.contracts import ARTIFACT_NAMES
 from dev_pipeline.errors import PipelineError, StageExecutionError, ValidationError
 from dev_pipeline.orchestrator import Orchestrator
+from dev_pipeline.patches import PatchValidator
 from dev_pipeline.providers import DemoModelClient, FileRequirementSource
 from dev_pipeline.storage import RunStore
 
@@ -144,3 +146,150 @@ def test_revise_passes_failure_feedback_to_development_agent(tmp_path: Path) -> 
     assert model.feedback == {"error": state.error}
     assert revised.attempts["development"] == 2
     assert revised.attempts["review"] == 2
+
+
+class AlreadySatisfiedModel(DemoModelClient):
+    def generate(self, stage, payload):
+        if stage == "review":
+            raise AssertionError("review must be skipped for already_satisfied development")
+        result = super().generate(stage, payload)
+        if stage == "analysis":
+            result["analysis"]["change_status"] = "already_satisfied"
+            result["analysis"]["changes"] = []
+        if stage == "development":
+            result["change_status"] = "already_satisfied"
+            result["changes"] = []
+            result["commit_message"] = "chore: no changes needed"
+        return result
+
+
+def test_already_satisfied_analysis_finishes_without_approval(tmp_path: Path) -> None:
+    requirement = tmp_path / "requirement.json"
+    write_requirement(requirement)
+    store = RunStore(tmp_path / "runs")
+
+    state = Orchestrator(store, make_agents(AlreadySatisfiedModel())).run(
+        str(requirement), TASK_ID
+    )
+
+    assert state.status == "no_changes_needed"
+    assert state.completed_stages == ["requirement", "analysis", "development"]
+    assert "review" not in state.artifacts
+    assert not (store.run_dir(TASK_ID) / ARTIFACT_NAMES["review"]).exists()
+    development = store.load_artifact(state, "development")
+    assert development["change_status"] == "already_satisfied"
+    assert development["changes"] == []
+
+
+def test_revise_skips_review_when_development_is_already_satisfied(tmp_path: Path) -> None:
+    requirement = tmp_path / "requirement.json"
+    write_requirement(requirement)
+    store = RunStore(tmp_path / "runs")
+    state = Orchestrator(store, make_agents()).run(str(requirement), TASK_ID)
+    state.status = "needs_revision"
+    store.save_state(state)
+
+    revised = Orchestrator(store, make_agents(AlreadySatisfiedModel())).revise(
+        TASK_ID, {"message": "reinspect current code"}
+    )
+
+    assert revised.status == "no_changes_needed"
+    assert revised.completed_stages == ["requirement", "analysis", "development"]
+    assert "review" not in revised.artifacts
+    assert not (store.run_dir(TASK_ID) / ARTIFACT_NAMES["review"]).exists()
+
+
+class InvalidThenValidModel(DemoModelClient):
+    def __init__(self) -> None:
+        self.development_calls = 0
+        self.validation_feedback = None
+
+    def generate(self, stage, payload):
+        result = super().generate(stage, payload)
+        if stage == "development":
+            self.development_calls += 1
+            self.validation_feedback = payload.get("development_validation_feedback")
+            result["changes"][0]["diff"] = (
+                "not a patch"
+                if self.development_calls == 1
+                else "--- a/app.txt\n+++ b/app.txt\n@@ -1 +1 @@\n-old\n+new\n"
+            )
+        return result
+
+
+def make_git_repo(path: Path) -> None:
+    path.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=path, check=True, capture_output=True)
+    (path / "app.txt").write_text("old\n", encoding="utf-8")
+    subprocess.run(["git", "add", "app.txt"], cwd=path, check=True, capture_output=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.test",
+            "commit",
+            "-m",
+            "init",
+        ],
+        cwd=path,
+        check=True,
+        capture_output=True,
+    )
+
+
+def test_invalid_patch_is_retried_and_only_valid_artifact_is_saved(tmp_path: Path) -> None:
+    requirement = tmp_path / "requirement.json"
+    write_requirement(requirement)
+    project = tmp_path / "project"
+    make_git_repo(project)
+    store = RunStore(tmp_path / "runs")
+    model = InvalidThenValidModel()
+    orchestrator = Orchestrator(
+        store,
+        make_agents(model),
+        max_retries=1,
+        development_validator=PatchValidator(project),
+    )
+
+    state = orchestrator.run(str(requirement), TASK_ID)
+
+    assert state.status == "awaiting_human_review"
+    assert model.development_calls == 2
+    assert model.validation_feedback is not None
+    assert "git apply --check" in model.validation_feedback["message"]
+    saved = store.load_artifact(state, "development")
+    assert saved["changes"][0]["diff"].startswith("--- a/app.txt")
+
+
+class AlwaysInvalidPatchModel(DemoModelClient):
+    def generate(self, stage, payload):
+        result = super().generate(stage, payload)
+        if stage == "development":
+            result["changes"][0]["diff"] = "not a patch"
+        return result
+
+
+def test_invalid_patch_is_never_saved_when_all_attempts_fail(tmp_path: Path) -> None:
+    requirement = tmp_path / "requirement.json"
+    write_requirement(requirement)
+    project = tmp_path / "project"
+    make_git_repo(project)
+    store = RunStore(tmp_path / "runs")
+    orchestrator = Orchestrator(
+        store,
+        make_agents(AlwaysInvalidPatchModel()),
+        max_retries=1,
+        development_validator=PatchValidator(project),
+    )
+
+    with pytest.raises(StageExecutionError, match="git apply --check"):
+        orchestrator.run(str(requirement), TASK_ID)
+
+    state = store.load_or_create(TASK_ID)
+    assert state.status == "failed"
+    assert state.error["stage"] == "development"
+    assert "git apply --check" in state.error["message"]
+    assert "development" not in state.artifacts
+    assert not (store.run_dir(TASK_ID) / "03_code_changes.json").exists()

@@ -7,12 +7,18 @@ import pytest
 
 from dev_pipeline.errors import PipelineError, ValidationError
 from dev_pipeline.providers import (
+    DEVELOPMENT_SCHEMA,
     ClaudeCodeClient,
     KimiCodeClient,
     ProjectContext,
     ReviewClient,
     ZenTaoRequirementSource,
 )
+
+
+def test_development_schema_is_strict() -> None:
+    assert DEVELOPMENT_SCHEMA["additionalProperties"] is False
+    assert DEVELOPMENT_SCHEMA["properties"]["changes"]["items"]["additionalProperties"] is False
 
 
 class FakeRunner:
@@ -49,6 +55,7 @@ def analysis_payload() -> dict:
         "analysis": {
             "task_id": "STORY-1",
             "analysis": {
+                "change_status": "changes_required",
                 "affected_files": ["src/app.py"],
                 "changes": [],
                 "dependencies": [],
@@ -63,6 +70,7 @@ def development_payload() -> dict:
         **analysis_payload(),
         "development": {
             "task_id": "STORY-1",
+            "change_status": "changes_required",
             "changes": [{"file": "src/app.py", "diff": "--- a\n+++ b"}],
             "commit_message": "feat: search",
         },
@@ -80,6 +88,7 @@ def test_kimi_analysis_builds_read_only_prompt_and_parses_jsonl(tmp_path: Path) 
     result = {
         "task_id": "STORY-1",
         "analysis": {
+            "change_status": "changes_required",
             "affected_files": ["src/app.py"],
             "changes": [],
             "dependencies": [],
@@ -110,6 +119,7 @@ def test_kimi_analysis_builds_read_only_prompt_and_parses_jsonl(tmp_path: Path) 
 def test_claude_development_uses_schema_and_source_files(tmp_path: Path) -> None:
     result = {
         "task_id": "STORY-1",
+        "change_status": "changes_required",
         "changes": [{"file": "src/app.py", "diff": "--- a\n+++ b"}],
         "commit_message": "feat: search",
     }
@@ -117,14 +127,16 @@ def test_claude_development_uses_schema_and_source_files(tmp_path: Path) -> None
     client = ClaudeCodeClient(project(tmp_path), runner=runner, model="sonnet")
 
     assert client.generate("development", analysis_payload()) == result
-    command = runner.calls[0]["command"]
+    call = runner.calls[0]
+    command = call["command"]
     assert command[0:2] == ["claude", "-p"]
     assert "--json-schema" in command
     assert command[command.index("--tools") + 1] == ""
     assert "--no-session-persistence" in command
-    prompt = command[2]
+    prompt = call["input_text"]
     assert "不要修改工作区" in prompt
     assert "print('hello')" in prompt
+    assert "不要修改工作区" not in " ".join(command)
 
 
 @pytest.mark.parametrize("tool", ["kimi", "claude"])
@@ -143,7 +155,12 @@ def test_review_client_parses_kimi_and_claude(tool: str, tmp_path: Path) -> None
     client = ReviewClient(project(tmp_path), tool=tool, runner=runner)
 
     assert client.generate("review", development_payload()) == result
-    assert "不要修改代码" in runner.calls[0]["command"][2]
+    call = runner.calls[0]
+    if tool == "kimi":
+        prompt = call["command"][call["command"].index("-p") + 1]
+    else:
+        prompt = call["input_text"]
+    assert "不要修改代码" in prompt
 
 
 def test_codex_review_is_read_only_and_reads_last_message(tmp_path: Path) -> None:
@@ -160,7 +177,7 @@ def test_codex_review_is_read_only_and_reads_last_message(tmp_path: Path) -> Non
     command = runner.calls[0]["command"]
     assert command[:2] == ["codex", "exec"]
     assert command[command.index("--sandbox") + 1] == "read-only"
-    assert command[command.index("--ask-for-approval") + 1] == "never"
+    assert command[command.index("-c") + 1] == "approval_policy=never"
     assert command[-1] == "-"
 
 

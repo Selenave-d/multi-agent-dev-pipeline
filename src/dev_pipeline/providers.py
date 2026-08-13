@@ -347,8 +347,18 @@ ANALYSIS_SCHEMA = {
         "task_id": {"type": "string"},
         "analysis": {
             "type": "object",
-            "required": ["affected_files", "changes", "dependencies", "estimated_complexity"],
+            "required": [
+                "change_status",
+                "affected_files",
+                "changes",
+                "dependencies",
+                "estimated_complexity",
+            ],
             "properties": {
+                "change_status": {
+                    "type": "string",
+                    "enum": ["changes_required", "already_satisfied"],
+                },
                 "affected_files": {"type": "array", "items": {"type": "string"}},
                 "changes": {"type": "array", "items": {"type": "object"}},
                 "dependencies": {"type": "array", "items": {"type": "string"}},
@@ -361,13 +371,19 @@ ANALYSIS_SCHEMA = {
 
 DEVELOPMENT_SCHEMA = {
     "type": "object",
-    "required": ["task_id", "changes", "commit_message"],
+    "additionalProperties": False,
+    "required": ["task_id", "change_status", "changes", "commit_message"],
     "properties": {
         "task_id": {"type": "string"},
+        "change_status": {
+            "type": "string",
+            "enum": ["changes_required", "already_satisfied"],
+        },
         "changes": {
             "type": "array",
             "items": {
                 "type": "object",
+                "additionalProperties": False,
                 "required": ["file", "diff"],
                 "properties": {"file": {"type": "string"}, "diff": {"type": "string"}},
             },
@@ -379,6 +395,7 @@ DEVELOPMENT_SCHEMA = {
 
 REVIEW_SCHEMA = {
     "type": "object",
+    "additionalProperties": False,
     "required": ["task_id", "review_result", "issues", "summary"],
     "properties": {
         "task_id": {"type": "string"},
@@ -386,7 +403,18 @@ REVIEW_SCHEMA = {
             "type": "string",
             "enum": ["pass", "pass_with_suggestions", "changes_requested"],
         },
-        "issues": {"type": "array", "items": {"type": "object"}},
+        "issues": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["severity", "message"],
+                "properties": {
+                    "severity": {"type": "string"},
+                    "message": {"type": "string"},
+                },
+            },
+        },
         "summary": {"type": "string"},
     },
 }
@@ -458,7 +486,10 @@ class KimiCodeClient(CodingClientBase):
         }
         return (
             "你是需求分析 Agent。只分析和规划，严禁写代码、修改文件或执行命令。"
-            "基于输入识别受影响文件、逐文件修改计划、依赖、复杂度和假设。"
+            "必须先用只读能力检查当前实现，特别是已有的校验、去重、兼容和边界处理。"
+            "如果现有代码已满足需求，设置 change_status=already_satisfied，并给出空 changes；"
+            "只有确认存在缺口时才设置 change_status=changes_required。"
+            "基于检查结果识别受影响文件、逐文件修改计划、依赖、复杂度和假设。"
             "只输出一个符合下方 JSON Schema 的 JSON 对象，不要 Markdown。\n"
             f"Schema: {json.dumps(ANALYSIS_SCHEMA, ensure_ascii=False)}\n"
             f"Input: {json.dumps(context, ensure_ascii=False)}"
@@ -496,9 +527,16 @@ class ClaudeCodeClient(CodingClientBase):
             "source_files": self.project.read_files(affected),
             "project": self.project.project_config,
             "revision_feedback": payload.get("revision_feedback"),
+            "development_validation_feedback": payload.get(
+                "development_validation_feedback"
+            ),
         }
         prompt = (
             "你是代码开发 Agent。按照已批准的分析方案生成 unified diff。"
+            "必须先读取 analysis 中的 inspect、change_status、changes 和现状结论。"
+            "如果分析表明需求已被当前代码满足，必须收手：返回 change_status="
+            "already_satisfied、changes=[]，不得为了产出而硬造修改。"
+            "只有确实需要修改时才返回 change_status=changes_required 和可应用的 unified diff。"
             "不要修改工作区，不要执行命令，不要省略 diff 内容。"
             "只返回符合指定 JSON Schema 的结构化结果。\n"
             f"Input: {json.dumps(context, ensure_ascii=False)}"
@@ -506,7 +544,6 @@ class ClaudeCodeClient(CodingClientBase):
         command = [
             self.command,
             "-p",
-            prompt,
             "--output-format",
             "json",
             "--json-schema",
@@ -517,7 +554,9 @@ class ClaudeCodeClient(CodingClientBase):
         ]
         if self.model:
             command.extend(["--model", self.model])
-        output = self.runner.run(command, cwd=self.project.root, timeout=self.timeout)
+        output = self.runner.run(
+            command, cwd=self.project.root, input_text=prompt, timeout=self.timeout
+        )
         envelope = self.parse_json_text(output)
         structured = envelope.get("structured_output")
         if isinstance(structured, dict):
@@ -561,7 +600,6 @@ class ReviewClient(CodingClientBase):
             command = [
                 self.command,
                 "-p",
-                prompt,
                 "--output-format",
                 "json",
                 "--json-schema",
@@ -573,7 +611,12 @@ class ReviewClient(CodingClientBase):
             if self.model:
                 command.extend(["--model", self.model])
             envelope = self.parse_json_text(
-                self.runner.run(command, cwd=self.project.root, timeout=self.timeout)
+                self.runner.run(
+                    command,
+                    cwd=self.project.root,
+                    input_text=prompt,
+                    timeout=self.timeout,
+                )
             )
             structured = envelope.get("structured_output")
             if isinstance(structured, dict):
@@ -594,8 +637,8 @@ class ReviewClient(CodingClientBase):
                 str(self.project.root),
                 "--sandbox",
                 "read-only",
-                "--ask-for-approval",
-                "never",
+                "-c",
+                "approval_policy=never",
                 "--ephemeral",
                 "--output-schema",
                 str(schema_path),
@@ -625,6 +668,7 @@ class DemoModelClient:
             return {
                 "task_id": task_id,
                 "analysis": {
+                    "change_status": "changes_required",
                     "affected_files": ["src/views/user/UserList.vue", "src/api/user.js"],
                     "changes": [
                         {
@@ -646,6 +690,7 @@ class DemoModelClient:
         if stage == "development":
             return {
                 "task_id": task_id,
+                "change_status": "changes_required",
                 "changes": [
                     {
                         "file": "src/views/user/UserList.vue",

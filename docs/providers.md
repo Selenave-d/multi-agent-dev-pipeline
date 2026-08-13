@@ -108,6 +108,7 @@ dev-pipeline --config config.demo.json --requirement examples/requirement.json
 - `provider_not_installed`：`command` 不在 PATH。先运行 `<command> --version`，或在配置中写可执行文件绝对路径。
 - `provider_timeout`：提高该阶段的 `timeout_seconds`，并检查 CLI 是否卡在登录、升级或权限提示。
 - `invalid_model_output`：模型没有严格返回 JSON。检查运行状态中的阶段错误；升级 CLI 后重新核对结构化输出参数。
+- `invalid_generated_patch`：development 生成的 diff 未通过目标仓库中的 `git apply --check`。Pipeline 会把错误反馈给下一次生成；全部重试失败时不会保存 `03_code_changes.json`。
 - `zentao_auth_failed`：确认 `key` 是 API 应用签名密钥，不是网页登录密码；检查服务器时间差。
 - `zentao_unreachable`：确认 VPN、代理、内网 DNS 和 `base_url`。
 - 已有失败运行：修复问题后使用 `--resume`；Pipeline 会校验并复用已完成阶段。
@@ -116,3 +117,5 @@ dev-pipeline --config config.demo.json --requirement examples/requirement.json
 - `git_command_failed`：检查 `changes.patch`、Git 输出和目标文件是否与分析时一致。
 - `needs_revision`：运行 `revise`，验证错误和 `06_verification.json` 会传回开发 Agent。
 - Review 与开发不应共用隐式会话。当前所有 CLI 调用都是新会话，并显式传递 JSON 产物。
+
+analysis 和 development 都必须返回 `change_status`。当前代码已满足需求时使用 `already_satisfied` 和空 `changes`，任务最终进入 `no_changes_needed`，不会开放 approve；确需修改时使用 `changes_required`，diff 必须在 development 阶段通过只读补丁校验。

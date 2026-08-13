@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from dev_pipeline.cli import build_agents, main
+from dev_pipeline.cli import build_agents, build_development_validator, main
 from dev_pipeline.providers import ZenTaoRequirementSource
 
 
@@ -97,3 +97,9 @@ def test_build_agents_injects_expected_zentao_product(tmp_path: Path) -> None:
     source = agents["requirement"].source
     assert isinstance(source, ZenTaoRequirementSource)
     assert source.expected_product_code == "DTS"
+
+
+def test_legacy_demo_config_does_not_enable_patch_validation(tmp_path: Path) -> None:
+    config = {"providers": {"model": "demo", "requirement": "file"}}
+
+    assert build_development_validator(config, tmp_path / "config.json") is None

@@ -51,6 +51,7 @@ def make_state(store: RunStore) -> RunState:
         "03_code_changes.json",
         {
             "task_id": TASK_ID,
+            "change_status": "changes_required",
             "changes": [
                 {
                     "file": "app.txt",
