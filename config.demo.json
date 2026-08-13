@@ -1,0 +1,16 @@
+{
+  "project": {
+    "name": "离线演示项目",
+    "root": "."
+  },
+  "pipeline": {
+    "runs_dir": "runs",
+    "max_retries": 1
+  },
+  "providers": {
+    "requirement": {"type": "file"},
+    "analysis": {"type": "demo"},
+    "development": {"type": "demo"},
+    "review": {"type": "demo"}
+  }
+}

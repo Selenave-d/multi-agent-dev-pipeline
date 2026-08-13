@@ -4,6 +4,8 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 .venv/
+.claude/
+.ai/
 config.json
 dist/
 build/

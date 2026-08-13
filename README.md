@@ -6,7 +6,7 @@
 需求文件 → 需求标准化 → 需求分析 → 代码变更建议 → 独立 Review → 等待人工确认
 ```
 
-它默认完全离线运行，不需要 API Key，也不会修改业务代码、执行 Git 提交或自动合并。离线 `demo` 适配器用于验证流程、数据契约和故障恢复；接入真实模型和禅道时只需实现已有接口。
+它支持离线 `demo` 回归，也可以把现有 AI 编程 CLI 包装成独立 Agent：禅道获取需求、Kimi Code 分析、Claude Code 生成补丁、Kimi/Claude/Codex Review。无论使用哪种工具，都不会自动应用 diff、提交或合并代码。
 
 ## 已实现
 
@@ -17,6 +17,8 @@
 - 重复任务保护：已有运行必须显式使用 `--resume`
 - 路径约束：任务 ID 不能逃逸 `runs` 目录
 - 确定性的离线端到端演示和自动化测试
+- 禅道只读适配器，以及 Kimi Code、Claude Code、Codex CLI 适配器
+- 每阶段独立 provider 配置，避免开发与 Review 共用隐式会话
 
 ## 环境要求
 
@@ -28,7 +30,7 @@ PowerShell：
 
 ```powershell
 cd D:\work-git\multi-agent-dev-pipeline
-Copy-Item config.example.json config.json
+Copy-Item config.demo.json config.json
 python -m venv .venv
 .\.venv\Scripts\python -m pip install -e ".[dev]"
 .\.venv\Scripts\dev-pipeline.exe --config config.json --requirement examples\requirement.json
@@ -56,9 +58,9 @@ runs/REQ-20260813-001/
 ```text
 CLI
  └─ Orchestrator
-     ├─ RequirementAgent ─ RequirementSource (当前：JSON 文件；后续：禅道)
+     ├─ RequirementAgent ─ RequirementSource (JSON 文件 / 禅道)
      ├─ AnalysisAgent    ┐
-     ├─ DevelopmentAgent├─ ModelClient (当前：demo；后续：模型 SDK/CLI)
+     ├─ DevelopmentAgent├─ ModelClient (demo / Kimi / Claude / Codex)
      └─ ReviewAgent      ┘
           │
           └─ RunStore（原子 JSON、校验和、断点状态）
@@ -76,6 +78,8 @@ class ModelClient(Protocol):
 
 真实模型的输出必须仍满足各阶段契约。Review Agent 只接收需求、分析和变更上下文，不与开发 Agent 共享隐式对话，从而保留独立审查边界。
 
+真实工具配置、凭据和故障排查见 [docs/providers.md](docs/providers.md)，各 CLI 命令、参数和返回格式见 [docs/tool-invocation.md](docs/tool-invocation.md)。
+
 ## 测试
 
 ```powershell
@@ -87,7 +91,7 @@ class ModelClient(Protocol):
 
 ## 当前安全边界
 
-- 不读取或修改配置项目根目录中的业务代码。
+- 分析阶段只读取受限目录树；开发阶段只读取分析结果点名且在大小限制内的 UTF-8 文件。
 - 不执行模型返回的命令或 diff。
 - 不自动提交、推送或合并 Git 分支。
 - 不把 API 密钥写入 JSON 产物。
@@ -95,7 +99,6 @@ class ModelClient(Protocol):
 
 ## 下一阶段
 
-1. 增加真实 `ModelClient` 适配器，并用 JSON Schema/结构化输出约束模型响应。
-2. 增加只读禅道 `RequirementSource`，认证信息仅来自环境变量或密钥管理器。
-3. 增加人工决策产物 `05_decision.json`，批准后才能进入 Git Agent。
-4. 在隔离 worktree 应用补丁并运行项目级 lint/test；仍不直接合并主分支。
+1. 增加人工决策产物 `05_decision.json`，批准后才能进入 Git Agent。
+2. 在隔离 worktree 应用补丁并运行项目级 lint/test；仍不直接合并主分支。
+3. 根据真实项目补充更严格的 JSON Schema 和文件访问白名单。

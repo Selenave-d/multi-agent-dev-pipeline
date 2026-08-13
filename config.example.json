@@ -1,7 +1,7 @@
 {
   "project": {
     "name": "内部管理系统",
-    "root": "examples/sample_project",
+    "root": "../target-project",
     "tech_stack": {
       "framework": "Vue 2",
       "language": "JavaScript",
@@ -26,7 +26,28 @@
     "max_retries": 1
   },
   "providers": {
-    "model": "demo",
-    "requirement": "file"
+    "requirement": {
+      "type": "zentao",
+      "config_file": "~/.zentao.json",
+      "timeout_seconds": 30
+    },
+    "analysis": {
+      "type": "kimi",
+      "command": "kimi",
+      "model": null,
+      "timeout_seconds": 600
+    },
+    "development": {
+      "type": "claude",
+      "command": "claude",
+      "model": "sonnet",
+      "timeout_seconds": 900
+    },
+    "review": {
+      "type": "codex",
+      "command": "codex",
+      "model": null,
+      "timeout_seconds": 600
+    }
   }
 }
