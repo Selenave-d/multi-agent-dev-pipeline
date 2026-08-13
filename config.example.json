@@ -23,7 +23,6 @@
   "pipeline": {
     "runs_dir": "runs",
     "worktree_dir": "runs",
-    "stop_after": "review",
     "max_retries": 1,
     "command_timeout_seconds": 1200,
     "commands": {
