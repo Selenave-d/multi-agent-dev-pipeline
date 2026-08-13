@@ -2,6 +2,7 @@
   "project": {
     "name": "内部管理系统",
     "root": "../target-project",
+    "zentao_product": "DTS",
     "tech_stack": {
       "framework": "Vue 2",
       "language": "JavaScript",

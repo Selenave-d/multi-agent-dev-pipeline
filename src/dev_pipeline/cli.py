@@ -67,6 +67,7 @@ def build_agents(config: dict[str, Any], config_path: Path) -> dict[str, Any]:
         config_file = resolve_path(config_path, configured_path) if configured_path else None
         requirement_source = ZenTaoRequirementSource(
             config_file,
+            expected_product_code=project_config.get("zentao_product"),
             timeout=int(requirement_config.get("timeout_seconds", 30)),
         )
     else:

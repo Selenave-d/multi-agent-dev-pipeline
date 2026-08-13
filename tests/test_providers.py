@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from dev_pipeline.errors import ValidationError
+from dev_pipeline.errors import PipelineError, ValidationError
 from dev_pipeline.providers import (
     ClaudeCodeClient,
     KimiCodeClient,
@@ -174,7 +174,8 @@ class FakeResponse:
 
 
 class FakeOpener:
-    def __init__(self) -> None:
+    def __init__(self, product_code: str = "DTS") -> None:
+        self.product_code = product_code
         self.requests = []
 
     def open(self, request, timeout):
@@ -182,16 +183,22 @@ class FakeOpener:
         url = request if isinstance(request, str) else request.full_url
         if "apilogin" in url:
             return FakeResponse(cookie="zentaosid=test-session; path=/")
+        if "/product-view-2.json" in url:
+            data = {"product": {"id": "2", "code": self.product_code}}
+            return FakeResponse({"status": "success", "data": json.dumps(data)})
+        object_type = "bug" if "/bug-view-" in url else "story"
+        object_id = "6043" if object_type == "bug" else "42"
         data = {
-            "story": {
-                "id": "42",
+            object_type: {
+                "id": object_id,
                 "title": "用户搜索",
                 "pri": "1",
                 "module": "7",
                 "status": "active",
                 "product": "2",
-                "spec": "<p>添加关键词搜索</p>",
-                "verify": "<p>空关键词返回全部</p>",
+                "spec": "<p>添加关键词搜索</p>" if object_type == "story" else None,
+                "verify": "<p>空关键词返回全部</p>" if object_type == "story" else None,
+                "steps": "<p>搜索结果错误</p>" if object_type == "bug" else None,
             }
         }
         wrapped = {"status": "success", "data": json.dumps(data)}
@@ -226,6 +233,70 @@ def test_zentao_fetch_logs_in_and_normalizes_story(tmp_path: Path) -> None:
     detail_request = opener.requests[1]
     assert detail_request.full_url.endswith("/story-view-42.json")
     assert detail_request.headers["Cookie"] == "zentaosid=test-session"
+    assert len(opener.requests) == 2
+
+
+def write_zentao_config(path: Path) -> None:
+    path.write_text(
+        json.dumps(
+            {
+                "base_url": "http://zentao.test/zentao",
+                "code": "code",
+                "key": "key",
+                "account": "user",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_zentao_product_code_match_is_traceable(tmp_path: Path) -> None:
+    config = tmp_path / "zentao.json"
+    write_zentao_config(config)
+    opener = FakeOpener(product_code="DTS")
+    source = ZenTaoRequirementSource(
+        config,
+        expected_product_code="DTS",
+        opener=opener,
+    )
+
+    result = source.fetch("story:42")
+
+    assert result["raw_data"]["product_code"] == "DTS"
+    product_request = opener.requests[2]
+    assert product_request.full_url.endswith("/product-view-2.json")
+    assert product_request.headers["Cookie"] == "zentaosid=test-session"
+
+
+def test_zentao_product_code_mismatch_stops_requirement(tmp_path: Path) -> None:
+    config = tmp_path / "zentao.json"
+    write_zentao_config(config)
+    source = ZenTaoRequirementSource(
+        config,
+        expected_product_code="DTS",
+        opener=FakeOpener(product_code="BV-GIS-AR"),
+    )
+
+    with pytest.raises(PipelineError) as error:
+        source.fetch("bug:6043")
+
+    assert error.value.code == "product_mismatch"
+    assert "DTS" in str(error.value)
+    assert "BV-GIS-AR" in str(error.value)
+    assert "bug:6043" in str(error.value)
+    assert "project.zentao_product" in str(error.value)
+
+
+def test_zentao_without_expected_product_skips_product_lookup(tmp_path: Path) -> None:
+    config = tmp_path / "zentao.json"
+    write_zentao_config(config)
+    opener = FakeOpener(product_code="BV-GIS-AR")
+    source = ZenTaoRequirementSource(config, opener=opener)
+
+    result = source.fetch("story:42")
+
+    assert "product_code" not in result["raw_data"]
+    assert len(opener.requests) == 2
 
 
 def test_zentao_reference_validation() -> None:

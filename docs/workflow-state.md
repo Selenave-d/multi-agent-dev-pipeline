@@ -2,7 +2,7 @@
 
 - id: config-template-drift
 - type: bug
-- title: 修复本地配置漂移和死配置字段
+- title: 增加禅道产品归属闸门
 - current_stage: done
-- diagnosis_file: docs/debug/config-template-drift-diagnosis.md
-- plan_file: docs/plans/config-template-drift-fix-plan.md
+- diagnosis_file: docs/debug/zentao-product-gate-diagnosis.md
+- plan_file: docs/plans/zentao-product-gate-fix-plan.md

@@ -122,10 +122,12 @@ class ZenTaoRequirementSource:
         self,
         config_path: Path | None = None,
         *,
+        expected_product_code: str | None = None,
         timeout: int = 30,
         opener: Any | None = None,
     ) -> None:
         self.config_path = (config_path or Path.home() / ".zentao.json").expanduser()
+        self.expected_product_code = expected_product_code
         self.timeout = timeout
         self.opener = opener or urllib.request.build_opener(_NoRedirectHandler())
         self._session_cookie: str | None = None
@@ -161,19 +163,35 @@ class ZenTaoRequirementSource:
             for field in description_fields
             if item.get(field)
         )
+        product_code: str | None = None
+        if self.expected_product_code:
+            product_id = item.get("product")
+            product_data = self._authenticated_get(config, f"/product-view-{product_id}.json")
+            product = product_data.get("product", {})
+            product_code = str(product.get("code") or "") if isinstance(product, dict) else ""
+            if product_code != self.expected_product_code:
+                raise PipelineError(
+                    f"ZenTao requirement {reference} belongs to product code "
+                    f"'{product_code}', expected '{self.expected_product_code}'. "
+                    "Correct project.zentao_product in config.",
+                    code="product_mismatch",
+                )
+        raw_data = {
+            "id": item.get("id"),
+            "type": object_type,
+            "status": item.get("status"),
+            "product": item.get("product"),
+            "source_url": f"{config.base_url}/{object_type}-view-{object_id}.html",
+        }
+        if product_code is not None:
+            raw_data["product_code"] = product_code
         return {
             "task_id": f"{object_type.upper()}-{object_id}",
             "title": str(item.get("title", "")),
             "description": description or "No description provided",
             "priority": str(item.get("pri") or item.get("priority") or "medium"),
             "module": str(item.get("module") or "unknown"),
-            "raw_data": {
-                "id": item.get("id"),
-                "type": object_type,
-                "status": item.get("status"),
-                "product": item.get("product"),
-                "source_url": f"{config.base_url}/{object_type}-view-{object_id}.html",
-            },
+            "raw_data": raw_data,
         }
 
     def _load_config(self) -> ZenTaoConfig:

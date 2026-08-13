@@ -26,6 +26,19 @@
 
 每个阶段可设置 `command`、`model`、`timeout_seconds`。`project.root` 必须指向待分析的真实业务仓库。
 
+使用禅道需求时，建议在项目配置中声明产品 code：
+
+```json
+{
+  "project": {
+    "root": "../target-project",
+    "zentao_product": "DTS"
+  }
+}
+```
+
+配置后，需求适配器会查询需求所属产品的详情并精确比较 `product.code`。不一致时以 `product_mismatch` 终止，需求不会进入分析；匹配的 code 会写入需求产物的 `raw_data.product_code`。未配置时不做产品查询，保持原有行为。
+
 执行配置：
 
 ```json
