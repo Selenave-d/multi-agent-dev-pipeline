@@ -1,0 +1,4 @@
+interface:
+  display_name: "Development Pipeline"
+  short_description: "Safely coordinate staged development from the current Git project"
+  default_prompt: "Use $dev-pipeline to implement this requirement safely in the current Git project."

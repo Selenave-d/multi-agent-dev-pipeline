@@ -1,0 +1,24 @@
+{
+  "project": {
+    "name": "当前项目",
+    "root": "."
+  },
+  "pipeline": {
+    "runs_dir": "~/.dev-pipeline/runs/current-project",
+    "worktree_dir": "~/.dev-pipeline/runs/current-project",
+    "max_retries": 3,
+    "commands": {
+      "lint": "npm run lint",
+      "test": "npm run test",
+      "build": "npm run build"
+    },
+    "work_log": {
+      "enabled": true
+    }
+  },
+  "providers": {
+    "requirement": {
+      "type": "file"
+    }
+  }
+}

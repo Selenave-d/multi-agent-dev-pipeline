@@ -6,7 +6,7 @@
 需求文件 → 需求标准化 → 需求分析 → 隔离 worktree 开发 → Git 生成补丁 → 独立 Review → 等待人工确认
 ```
 
-它支持离线 `demo` 回归，也可以把现有 AI 编程 CLI 包装成独立 Agent：禅道获取需求、Kimi Code 分析、Claude Code 生成补丁、Kimi/Claude/Codex Review。无论使用哪种工具，都不会自动应用 diff、提交或合并代码。
+默认交互方式是在目标项目中使用 Codex Skill，由宿主子 Agent 分别完成分析、开发和独立 Review；Pipeline 负责状态、worktree、补丁与验证。它也保留离线 `demo` 和 Kimi/Claude Code/Codex CLI Provider，供纯终端或无宿主 Agent 的环境使用。无论使用哪种方式，都不会未经人工批准应用补丁或合并代码。
 
 ## 已实现
 
@@ -30,6 +30,53 @@
 - Python 3.10+
 
 ## 快速开始
+
+### 在目标项目中使用（推荐）
+
+先安装本项目，再把 `skills/dev-pipeline` 安装到 Codex 的全局 Skills 目录。目标项目根目录放置一个已纳入版本控制的 `.dev-pipeline.json`：
+
+```powershell
+cd D:\work-git\multi-agent-dev-pipeline
+.\.venv\Scripts\python -m pip install -e ".[dev]"
+
+cd D:\work-git\your-project
+Copy-Item D:\work-git\multi-agent-dev-pipeline\.dev-pipeline.example.json .dev-pipeline.json
+```
+
+将 `project.root` 保持为 `.`，按项目修改 lint/test/build 命令。示例配置把 `runs_dir` 和 `worktree_dir` 放到用户目录，避免运行产物弄脏目标仓库；若省略这两个字段，CLI 仍使用配置文件旁的 `runs/`。
+
+随后在 Codex Desktop 打开目标项目，直接说：
+
+```text
+使用 $dev-pipeline 实现这个需求：<需求文件或禅道引用>
+```
+
+Skill 调用的阶段协议如下：
+
+```text
+start → analysis 子 Agent → submit
+      → prepare worktree → development 子 Agent → capture Git patch
+      → independent review 子 Agent → submit
+      → 人工 approve → lint/test/build/browser → 人工 merge
+```
+
+宿主模式的项目配置只需要 `providers.requirement`；analysis/development/review Provider 不配置也可以。现有 Kimi、Claude Code、Codex Provider 仅作为后备模式保留。
+
+阶段命令也可以手工执行：
+
+```powershell
+dev-pipeline start --requirement requirements\TASK-1.json
+dev-pipeline context --task-id TASK-1 --stage analysis
+dev-pipeline submit --task-id TASK-1 --stage analysis --artifact analysis.json
+dev-pipeline prepare --task-id TASK-1
+dev-pipeline context --task-id TASK-1 --stage development
+# Agent 只编辑 prepare 返回的 development_worktree_path
+dev-pipeline capture --task-id TASK-1 --result development-result.json
+dev-pipeline context --task-id TASK-1 --stage review
+dev-pipeline submit --task-id TASK-1 --stage review --artifact review.json
+```
+
+### 独立 CLI / Demo 模式
 
 PowerShell：
 
@@ -97,14 +144,16 @@ awaiting_human_review
 ## 架构
 
 ```text
-CLI
- └─ Orchestrator
-     ├─ RequirementAgent ─ RequirementSource (JSON 文件 / 禅道)
-     ├─ AnalysisAgent    ┐
-     ├─ DevelopmentAgent├─ ModelClient (demo / Kimi / Claude / Codex)
-     └─ ReviewAgent      ┘
-          │
-          └─ RunStore（原子 JSON、校验和、断点状态）
+Codex Skill（默认）               Provider CLI（后备）
+  ├─ analysis subagent             ├─ Kimi analysis
+  ├─ development subagent          ├─ Claude development
+  └─ independent review subagent   └─ Codex/Kimi/Claude review
+                 │                         │
+                 └──────────┬──────────────┘
+                            ▼
+                 Pipeline execution kernel
+                 contracts / RunStore / worktree
+                 Git patch / verify / approve / merge / worklog
 ```
 
 核心扩展接口：
@@ -141,7 +190,7 @@ class ModelClient(Protocol):
 - 页面点击验收由 Pipeline 自带 Playwright 在批准 worktree 中运行；截图和服务日志仅写入对应 run 目录。
 - 只有人工 `merge` 后才提交任务分支并 `--no-ff` 合并；不自动推送远程。
 - 不把 API 密钥写入 JSON 产物。
-- 禅道写回、人工批准和 Git Agent 留到下一阶段实现。
+- 禅道写回和远程推送仍不在自动执行范围内。
 
 ## 下一阶段
 

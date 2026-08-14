@@ -9,8 +9,10 @@ from typing import Any
 
 from .agents import ModelAgent, RequirementAgent
 from .browser import PlaywrightBrowserVerifier
+from .development import DevelopmentWorkspace
 from .errors import PipelineError, ValidationError
 from .execution import WorktreeExecutor
+from .external import ExternalWorkflow
 from .formatting import DevelopmentFormatter
 from .orchestrator import Orchestrator, resolve_runs_dir
 from .patches import PatchValidator
@@ -27,7 +29,20 @@ from .providers import (
 from .storage import RunStore
 from .worklog import WorkLogWriter
 
-COMMANDS = {"run", "approve", "reject", "status", "logs", "revise", "merge"}
+COMMANDS = {
+    "run",
+    "start",
+    "context",
+    "submit",
+    "prepare",
+    "capture",
+    "approve",
+    "reject",
+    "status",
+    "logs",
+    "revise",
+    "merge",
+}
 TERMINAL_STATUSES = {"merged", "rejected", "no_changes_needed"}
 
 
@@ -42,6 +57,32 @@ def load_config(path: Path) -> dict[str, Any]:
 def resolve_path(config_path: Path, configured: str) -> Path:
     path = Path(configured).expanduser()
     return path.resolve() if path.is_absolute() else (config_path.parent / path).resolve()
+
+
+def build_requirement_agent(
+    config: dict[str, Any], config_path: Path
+) -> RequirementAgent:
+    providers = config.get("providers", {})
+    project_config = config.get("project", {})
+    requirement_config = providers.get("requirement", {"type": "file"})
+    if isinstance(requirement_config, str):
+        requirement_type = requirement_config
+        requirement_config = {"type": requirement_type}
+    else:
+        requirement_type = requirement_config.get("type", "file")
+    if requirement_type == "file":
+        return RequirementAgent(FileRequirementSource())
+    if requirement_type == "zentao":
+        configured_path = requirement_config.get("config_file")
+        config_file = resolve_path(config_path, configured_path) if configured_path else None
+        return RequirementAgent(
+            ZenTaoRequirementSource(
+                config_file,
+                expected_product_code=project_config.get("zentao_product"),
+                timeout=int(requirement_config.get("timeout_seconds", 30)),
+            )
+        )
+    raise ValidationError(f"Unsupported requirement provider: {requirement_type}")
 
 
 def build_agents(
@@ -91,21 +132,6 @@ def build_agents(
             store.append_event(task_id, {"stage": stage, **details})
 
         return record
-
-    requirement_config = providers.get("requirement", {"type": "file"})
-    requirement_type = requirement_config.get("type", "file")
-    if requirement_type == "file":
-        requirement_source = FileRequirementSource()
-    elif requirement_type == "zentao":
-        configured_path = requirement_config.get("config_file")
-        config_file = resolve_path(config_path, configured_path) if configured_path else None
-        requirement_source = ZenTaoRequirementSource(
-            config_file,
-            expected_product_code=project_config.get("zentao_product"),
-            timeout=int(requirement_config.get("timeout_seconds", 30)),
-        )
-    else:
-        raise ValidationError(f"Unsupported requirement provider: {requirement_type}")
 
     analysis_config = providers.get("analysis", {"type": "demo"})
     development_config = providers.get("development", {"type": "demo"})
@@ -167,7 +193,7 @@ def build_agents(
         raise ValidationError(f"Unsupported review provider: {review_type}")
 
     return {
-        "requirement": RequirementAgent(requirement_source),
+        "requirement": build_requirement_agent(config, config_path),
         "analysis": ModelAgent("analysis", analysis_client),
         "development": ModelAgent("development", development_client),
         "review": ModelAgent("review", review_client),
@@ -175,7 +201,10 @@ def build_agents(
 
 
 def add_config_argument(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--config", default="config.json", help="Path to pipeline config JSON")
+    parser.add_argument(
+        "--config",
+        help="Config JSON; defaults to .dev-pipeline.json or config.json in the current directory",
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -191,6 +220,31 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run.add_argument("--task-id", help="Task ID; defaults to requirement.task_id")
     run.add_argument("--resume", action="store_true", help="Resume a prior interrupted run")
+
+    start = subparsers.add_parser("start", help="Start a host-Agent run and fetch requirement")
+    add_config_argument(start)
+    start.add_argument("--requirement", required=True)
+    start.add_argument("--task-id", help="Task ID; defaults to requirement.task_id")
+
+    context = subparsers.add_parser("context", help="Print context for the pending host stage")
+    add_config_argument(context)
+    context.add_argument("--task-id", required=True)
+    context.add_argument("--stage", required=True, choices=("analysis", "development", "review"))
+
+    submit = subparsers.add_parser("submit", help="Submit a host analysis or review artifact")
+    add_config_argument(submit)
+    submit.add_argument("--task-id", required=True)
+    submit.add_argument("--stage", required=True, choices=("analysis", "review"))
+    submit.add_argument("--artifact", required=True, help="Path to artifact JSON")
+
+    prepare = subparsers.add_parser("prepare", help="Create the host development worktree")
+    add_config_argument(prepare)
+    prepare.add_argument("--task-id", required=True)
+
+    capture = subparsers.add_parser("capture", help="Capture host edits as a validated Git patch")
+    add_config_argument(capture)
+    capture.add_argument("--task-id", required=True)
+    capture.add_argument("--result", required=True, help="Development result JSON path")
 
     for name in ("approve", "reject", "revise", "merge"):
         command = subparsers.add_parser(name)
@@ -214,11 +268,58 @@ def normalize_argv(argv: list[str] | None) -> list[str]:
 
 
 def load_runtime(args: argparse.Namespace) -> tuple[Path, dict[str, Any], RunStore]:
-    config_path = Path(args.config).resolve()
+    configured = getattr(args, "config", None)
+    if configured:
+        config_path = Path(configured).resolve()
+    else:
+        candidates = (Path.cwd() / ".dev-pipeline.json", Path.cwd() / "config.json")
+        config_path = next((path.resolve() for path in candidates if path.is_file()), None)
+        if config_path is None:
+            raise ValidationError(
+                "No config found; create .dev-pipeline.json in the current project or pass --config"
+            )
     config = load_config(config_path)
     pipeline_config = config.get("pipeline", {})
     runs_dir = resolve_runs_dir(config_path, pipeline_config.get("runs_dir", "runs"))
     return config_path, config, RunStore(runs_dir)
+
+
+def load_existing_state(store: RunStore, task_id: str) -> Any:
+    if not store.state_path(task_id).is_file():
+        raise PipelineError(f"Run '{task_id}' does not exist", code="run_not_found")
+    return store.load_or_create(task_id)
+
+
+def build_external_workflow(
+    config_path: Path,
+    config: dict[str, Any],
+    store: RunStore,
+    task_id: str,
+) -> ExternalWorkflow:
+    project_config = config.get("project", {})
+    project_root = resolve_path(config_path, project_config.get("root", "."))
+    pipeline = config.get("pipeline", {})
+    commands = pipeline.get("commands", {})
+    project = ProjectContext(project_root, project_config)
+    workspace = DevelopmentWorkspace(
+        project_root,
+        store.run_dir(task_id) / "development-worktree",
+        formatter=DevelopmentFormatter(
+            project_root,
+            command=commands.get("format"),
+            auto_detect="format" not in commands,
+            timeout=int(pipeline.get("format_timeout_seconds", 300)),
+        ),
+        event_callback=lambda event: store.append_event(task_id, event),
+    )
+    return ExternalWorkflow(
+        store,
+        build_requirement_agent(config, config_path),
+        workspace,
+        PatchValidator(project_root),
+        project_config,
+        project.tree(),
+    )
 
 
 def build_executor(
@@ -321,6 +422,59 @@ def run_command(args: argparse.Namespace) -> dict[str, Any]:
     return state.to_dict()
 
 
+def start_command(args: argparse.Namespace) -> dict[str, Any]:
+    config_path, config, store = load_runtime(args)
+    reference, inferred_task_id = infer_requirement(config, args.requirement)
+    task_id = args.task_id or inferred_task_id
+    if not task_id:
+        raise ValidationError("Requirement must contain task_id or use --task-id")
+    workflow = build_external_workflow(config_path, config, store, task_id)
+    return workflow.start(
+        reference,
+        task_id,
+        metadata={"config_path": str(config_path)},
+    ).to_dict()
+
+
+def context_command(args: argparse.Namespace) -> dict[str, Any]:
+    config_path, config, store = load_runtime(args)
+    state = load_existing_state(store, args.task_id)
+    return build_external_workflow(
+        config_path, config, store, args.task_id
+    ).context(state, args.stage)
+
+
+def submit_command(args: argparse.Namespace) -> dict[str, Any]:
+    config_path, config, store = load_runtime(args)
+    state = load_existing_state(store, args.task_id)
+    artifact = RunStore.read_json(Path(args.artifact).resolve())
+    return build_external_workflow(
+        config_path, config, store, args.task_id
+    ).submit(state, args.stage, artifact).to_dict()
+
+
+def prepare_command(args: argparse.Namespace) -> dict[str, Any]:
+    config_path, config, store = load_runtime(args)
+    state = load_existing_state(store, args.task_id)
+    workflow = build_external_workflow(config_path, config, store, args.task_id)
+    if state.status == "needs_revision":
+        feedback: dict[str, Any] = {"error": state.error}
+        if "verification" in state.artifacts:
+            feedback["verification"] = store.load_artifact(state, "verification")
+        build_executor(config_path, config, store).cleanup_for_revision(state)
+        state = workflow.begin_revision(state, feedback)
+    return workflow.prepare(state).to_dict()
+
+
+def capture_command(args: argparse.Namespace) -> dict[str, Any]:
+    config_path, config, store = load_runtime(args)
+    state = load_existing_state(store, args.task_id)
+    result = RunStore.read_json(Path(args.result).resolve())
+    return build_external_workflow(
+        config_path, config, store, args.task_id
+    ).capture(state, result).to_dict()
+
+
 def approve_command(args: argparse.Namespace) -> dict[str, Any]:
     config_path, config, store = load_runtime(args)
     state = store.load_or_create(args.task_id)
@@ -415,6 +569,11 @@ def main(argv: list[str] | None = None) -> int:
     try:
         handlers = {
             "run": run_command,
+            "start": start_command,
+            "context": context_command,
+            "submit": submit_command,
+            "prepare": prepare_command,
+            "capture": capture_command,
             "approve": approve_command,
             "reject": reject_command,
             "status": status_command,

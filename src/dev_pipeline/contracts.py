@@ -43,7 +43,7 @@ def validate_artifact(stage: str, data: dict[str, Any], task_id: str | None = No
         "requirement": ("title", "description", "priority", "module"),
         "analysis": ("analysis",),
         "development": ("change_status", "commit_message"),
-        "review": ("review_result", "issues", "summary"),
+        "review": ("review_result", "summary"),
     }
     require_fields(data, *stage_fields[stage])
     if stage == "analysis":
@@ -64,6 +64,11 @@ def validate_artifact(stage: str, data: dict[str, Any], task_id: str | None = No
             raise ValidationError("changes_required development must contain changes")
         if change_status not in {"already_satisfied", "changes_required"}:
             raise ValidationError(f"Unknown development change_status: {change_status}")
+    if stage == "review":
+        if "issues" not in data:
+            raise ValidationError("Missing required field(s): issues")
+        if not isinstance(data["issues"], list):
+            raise ValidationError("Review 'issues' must be an array")
 
 
 @dataclass

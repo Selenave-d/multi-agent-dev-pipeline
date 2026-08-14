@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -191,3 +192,177 @@ def test_build_executor_configures_relative_worklog_path(tmp_path: Path) -> None
 
     assert isinstance(executor.work_log_sink, WorkLogWriter)
     assert executor.work_log_sink.configured_path == (tmp_path / "daily-logs").resolve()
+
+
+def test_cli_discovers_project_local_config_for_host_start(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    requirement = tmp_path / "requirement.json"
+    requirement.write_text(
+        json.dumps(
+            {
+                "task_id": "HOST-CLI-1",
+                "title": "调整页面",
+                "description": "更新展示内容",
+                "priority": "medium",
+                "module": "page",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / ".dev-pipeline.json").write_text(
+        json.dumps(
+            {
+                "project": {"root": ".", "name": "host-test"},
+                "pipeline": {"runs_dir": "outside-runs"},
+                "providers": {
+                    "requirement": {"type": "file"},
+                    "analysis": {"type": "demo"},
+                    "development": {"type": "demo"},
+                    "review": {"type": "demo"},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+
+    assert main(["start", "--requirement", str(requirement)]) == 0
+
+    output = json.loads(capsys.readouterr().out)
+    assert output["task_id"] == "HOST-CLI-1"
+    assert output["status"] == "awaiting_analysis"
+
+
+def test_cli_host_stage_protocol_reaches_human_review(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "app.py").write_text("value = 1\n", encoding="utf-8")
+    config = project / ".dev-pipeline.json"
+    config.write_text(
+        json.dumps(
+            {
+                "project": {"root": ".", "name": "host-cli"},
+                "pipeline": {
+                    "runs_dir": str(tmp_path / "runs"),
+                    "worktree_dir": str(tmp_path / "runs"),
+                    "commands": {"format": ""},
+                },
+                "providers": {"requirement": {"type": "file"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "init", "-b", "main"], cwd=project, check=True, capture_output=True)
+    subprocess.run(["git", "add", "--all"], cwd=project, check=True, capture_output=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.test",
+            "commit",
+            "-m",
+            "init",
+        ],
+        cwd=project,
+        check=True,
+        capture_output=True,
+    )
+    requirement = tmp_path / "requirement.json"
+    requirement.write_text(
+        json.dumps(
+            {
+                "task_id": "HOST-CLI-2",
+                "title": "调整值",
+                "description": "把值改为 2",
+                "priority": "medium",
+                "module": "core",
+            }
+        ),
+        encoding="utf-8",
+    )
+    analysis = tmp_path / "analysis.json"
+    analysis.write_text(
+        json.dumps(
+            {
+                "task_id": "HOST-CLI-2",
+                "analysis": {
+                    "change_status": "changes_required",
+                    "affected_files": ["app.py"],
+                    "changes": [
+                        {"file": "app.py", "action": "modify", "description": "调整值"}
+                    ],
+                    "dependencies": [],
+                    "estimated_complexity": "low",
+                    "assumptions": [],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(project)
+
+    assert main(["start", "--requirement", str(requirement)]) == 0
+    capsys.readouterr()
+    assert main(
+        [
+            "submit",
+            "--task-id",
+            "HOST-CLI-2",
+            "--stage",
+            "analysis",
+            "--artifact",
+            str(analysis),
+        ]
+    ) == 0
+    capsys.readouterr()
+    assert main(["prepare", "--task-id", "HOST-CLI-2"]) == 0
+    prepared = json.loads(capsys.readouterr().out)
+    worktree = Path(prepared["metadata"]["development_worktree_path"])
+    (worktree / "app.py").write_text("value = 2\n", encoding="utf-8")
+    result = tmp_path / "development-result.json"
+    result.write_text(
+        json.dumps(
+            {
+                "task_id": "HOST-CLI-2",
+                "change_status": "changes_required",
+                "commit_message": "fix: adjust value",
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert main(["capture", "--task-id", "HOST-CLI-2", "--result", str(result)]) == 0
+    captured = json.loads(capsys.readouterr().out)
+    assert captured["status"] == "awaiting_review"
+    assert main(["context", "--task-id", "HOST-CLI-2", "--stage", "review"]) == 0
+    review_context = json.loads(capsys.readouterr().out)
+    assert review_context["development"]["changes"]
+    review = tmp_path / "review.json"
+    review.write_text(
+        json.dumps(
+            {
+                "task_id": "HOST-CLI-2",
+                "review_result": "pass",
+                "issues": [],
+                "summary": "变更正确",
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert main(
+        [
+            "submit",
+            "--task-id",
+            "HOST-CLI-2",
+            "--stage",
+            "review",
+            "--artifact",
+            str(review),
+        ]
+    ) == 0
+    completed = json.loads(capsys.readouterr().out)
+    assert completed["status"] == "awaiting_human_review"
