@@ -57,6 +57,15 @@ def test_pipeline_writes_valid_traceable_artifacts(tmp_path: Path) -> None:
     review = store.load_artifact(state, "review")
     assert review["review_result"] == "pass_with_suggestions"
     assert review["task_id"] == TASK_ID
+    events = store.read_events(TASK_ID)
+    assert events[0]["event"] == "run_started"
+    assert [event["stage"] for event in events if event["event"] == "stage_completed"] == [
+        "requirement",
+        "analysis",
+        "development",
+        "review",
+    ]
+    assert events[-1]["event"] == "run_completed"
 
 
 def test_existing_run_requires_explicit_resume(tmp_path: Path) -> None:

@@ -12,6 +12,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -42,6 +43,9 @@ class CommandRunner(Protocol):
 class SubprocessCommandRunner:
     """Runs an already authenticated coding CLI and returns stdout."""
 
+    def __init__(self, observer: Callable[[dict[str, Any]], None] | None = None) -> None:
+        self.observer = observer
+
     def run(
         self,
         command: list[str],
@@ -56,6 +60,9 @@ class SubprocessCommandRunner:
                 f"Command not found: {command[0]}",
                 code="provider_not_installed",
             )
+        started = time.monotonic()
+        if self.observer:
+            self.observer({"event": "tool_started", "tool": command[0], "cwd": str(cwd)})
         try:
             result = subprocess.run(
                 [executable, *command[1:]],
@@ -69,10 +76,30 @@ class SubprocessCommandRunner:
                 check=False,
             )
         except subprocess.TimeoutExpired as exc:
+            if self.observer:
+                self.observer(
+                    {
+                        "event": "tool_failed",
+                        "tool": command[0],
+                        "duration_seconds": round(time.monotonic() - started, 3),
+                        "error": f"timed out after {timeout}s",
+                    }
+                )
             raise PipelineError(
                 f"Provider command timed out after {timeout}s: {command[0]}",
                 code="provider_timeout",
             ) from exc
+        if self.observer:
+            self.observer(
+                {
+                    "event": "tool_finished" if result.returncode == 0 else "tool_failed",
+                    "tool": command[0],
+                    "exit_code": result.returncode,
+                    "duration_seconds": round(time.monotonic() - started, 3),
+                    "stdout": result.stdout,
+                    "stderr": result.stderr,
+                }
+            )
         if result.returncode != 0:
             detail = (result.stderr or result.stdout).strip()[-2000:]
             raise PipelineError(
@@ -393,6 +420,20 @@ DEVELOPMENT_SCHEMA = {
     },
 }
 
+DEVELOPMENT_EDIT_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["task_id", "change_status", "commit_message"],
+    "properties": {
+        "task_id": {"type": "string"},
+        "change_status": {
+            "type": "string",
+            "enum": ["changes_required", "already_satisfied"],
+        },
+        "commit_message": {"type": "string"},
+    },
+}
+
 REVIEW_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
@@ -512,19 +553,26 @@ class KimiCodeClient(CodingClientBase):
 
 
 class ClaudeCodeClient(CodingClientBase):
-    """Claude Code development adapter; returns patches without editing the project."""
+    """Lets Claude edit an isolated worktree and uses Git to produce the patch."""
 
-    def __init__(self, project: ProjectContext, **kwargs: Any) -> None:
+    def __init__(
+        self,
+        project: ProjectContext,
+        *,
+        worktree_path: Path | None = None,
+        event_callback: Callable[[dict[str, Any]], None] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        self.worktree_path = (worktree_path or project.root / ".pipeline-development").resolve()
+        self.event_callback = event_callback
         super().__init__(project, command=kwargs.pop("command", "claude"), **kwargs)
 
     def generate(self, stage: str, payload: dict[str, Any]) -> dict[str, Any]:
         if stage != "development":
             raise ValidationError("ClaudeCodeClient only supports the development stage")
-        affected = payload["analysis"]["analysis"].get("affected_files", [])
         context = {
             "requirement": payload["requirement"],
             "analysis": payload["analysis"],
-            "source_files": self.project.read_files(affected),
             "project": self.project.project_config,
             "revision_feedback": payload.get("revision_feedback"),
             "development_validation_feedback": payload.get(
@@ -532,13 +580,12 @@ class ClaudeCodeClient(CodingClientBase):
             ),
         }
         prompt = (
-            "你是代码开发 Agent。按照已批准的分析方案生成 unified diff。"
+            "你是代码开发 Agent。当前目录是从目标仓库 HEAD 创建的隔离 worktree。"
             "必须先读取 analysis 中的 inspect、change_status、changes 和现状结论。"
             "如果分析表明需求已被当前代码满足，必须收手：返回 change_status="
-            "already_satisfied、changes=[]，不得为了产出而硬造修改。"
-            "只有确实需要修改时才返回 change_status=changes_required 和可应用的 unified diff。"
-            "不要修改工作区，不要执行命令，不要省略 diff 内容。"
-            "只返回符合指定 JSON Schema 的结构化结果。\n"
+            "already_satisfied，不得修改文件。只有确实需要修改时，直接编辑 worktree 中的文件，"
+            "返回 change_status=changes_required。不要生成或返回 unified diff；diff 由 Git 生成。"
+            "不得执行 shell 命令。只返回符合指定 JSON Schema 的结构化结果。\n"
             f"Input: {json.dumps(context, ensure_ascii=False)}"
         )
         command = [
@@ -547,22 +594,118 @@ class ClaudeCodeClient(CodingClientBase):
             "--output-format",
             "json",
             "--json-schema",
-            json.dumps(DEVELOPMENT_SCHEMA),
+            json.dumps(DEVELOPMENT_EDIT_SCHEMA),
             "--tools",
-            "",
+            "Read,Edit,Write,Glob,Grep",
+            "--allowedTools",
+            "Read,Edit,Write,Glob,Grep",
+            "--permission-mode",
+            "acceptEdits",
             "--no-session-persistence",
         ]
         if self.model:
             command.extend(["--model", self.model])
-        output = self.runner.run(
-            command, cwd=self.project.root, input_text=prompt, timeout=self.timeout
+        try:
+            self._prepare_worktree()
+            output = self.runner.run(
+                command, cwd=self.worktree_path, input_text=prompt, timeout=self.timeout
+            )
+            envelope = self.parse_json_text(output)
+            structured = envelope.get("structured_output")
+            result = structured if isinstance(structured, dict) else envelope.get("result")
+            response = (
+                result
+                if isinstance(result, dict)
+                else self.parse_json_text(result)
+                if isinstance(result, str)
+                else envelope
+            )
+            return self._build_development_artifact(response)
+        finally:
+            self._remove_worktree()
+
+    def _prepare_worktree(self) -> None:
+        if self._git_text(["status", "--porcelain"], self.project.root):
+            raise PipelineError(
+                f"Project repository has uncommitted changes: {self.project.root}",
+                code="project_dirty",
+            )
+        if self.worktree_path.exists():
+            raise PipelineError(
+                f"Development worktree already exists: {self.worktree_path}",
+                code="worktree_exists",
+            )
+        self.worktree_path.parent.mkdir(parents=True, exist_ok=True)
+        self._git(
+            ["worktree", "add", "--detach", str(self.worktree_path), "HEAD"],
+            self.project.root,
         )
-        envelope = self.parse_json_text(output)
-        structured = envelope.get("structured_output")
-        if isinstance(structured, dict):
-            return structured
-        result = envelope.get("result")
-        return self.parse_json_text(result) if isinstance(result, str) else envelope
+        self._event("development_worktree_created", path=str(self.worktree_path))
+
+    def _remove_worktree(self) -> None:
+        if self.worktree_path.exists():
+            self._git(
+                ["worktree", "remove", "--force", str(self.worktree_path)],
+                self.project.root,
+                check=False,
+            )
+        self._git(["worktree", "prune"], self.project.root, check=False)
+        self._event("development_worktree_removed", path=str(self.worktree_path))
+
+    def _build_development_artifact(self, response: dict[str, Any]) -> dict[str, Any]:
+        self._git(["add", "--intent-to-add", "--all"], self.worktree_path)
+        patch = self._git(["diff", "--binary", "HEAD", "--"], self.worktree_path).stdout
+        files = self._git_text(["diff", "--name-only", "HEAD", "--"], self.worktree_path)
+        has_changes = bool(patch.strip())
+        declared = response.get("change_status")
+        if declared == "already_satisfied" and has_changes:
+            raise PipelineError(
+                "Claude declared already_satisfied but modified the worktree",
+                code="inconsistent_development_result",
+            )
+        if declared == "changes_required" and not has_changes:
+            raise PipelineError(
+                "Claude declared changes_required but made no worktree changes",
+                code="empty_generated_change",
+            )
+        changes = []
+        if has_changes:
+            changes.append({"file": ", ".join(files.splitlines()), "diff": patch})
+        self._event("development_diff_generated", files=files.splitlines())
+        return {
+            "task_id": response.get("task_id"),
+            "change_status": declared,
+            "changes": changes,
+            "commit_message": response.get("commit_message"),
+        }
+
+    def _git(
+        self,
+        args: list[str],
+        cwd: Path,
+        *,
+        check: bool = True,
+    ) -> subprocess.CompletedProcess[str]:
+        result = subprocess.run(
+            ["git", *args],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+        if check and result.returncode != 0:
+            detail = (result.stderr or result.stdout).strip()[-4000:]
+            raise PipelineError(f"Git command failed: {detail}", code="git_command_failed")
+        return result
+
+    def _git_text(self, args: list[str], cwd: Path) -> str:
+        return self._git(args, cwd).stdout.strip()
+
+    def _event(self, event: str, **details: Any) -> None:
+        if self.event_callback:
+            self.event_callback({"event": event, "stage": "development", **details})
 
 
 class ReviewClient(CodingClientBase):

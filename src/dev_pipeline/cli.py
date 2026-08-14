@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -18,11 +19,12 @@ from .providers import (
     KimiCodeClient,
     ProjectContext,
     ReviewClient,
+    SubprocessCommandRunner,
     ZenTaoRequirementSource,
 )
 from .storage import RunStore
 
-COMMANDS = {"run", "approve", "reject", "status", "revise", "merge"}
+COMMANDS = {"run", "approve", "reject", "status", "logs", "revise", "merge"}
 TERMINAL_STATUSES = {"merged", "rejected", "no_changes_needed"}
 
 
@@ -39,7 +41,13 @@ def resolve_path(config_path: Path, configured: str) -> Path:
     return path.resolve() if path.is_absolute() else (config_path.parent / path).resolve()
 
 
-def build_agents(config: dict[str, Any], config_path: Path) -> dict[str, Any]:
+def build_agents(
+    config: dict[str, Any],
+    config_path: Path,
+    *,
+    store: RunStore | None = None,
+    task_id: str | None = None,
+) -> dict[str, Any]:
     providers = config.get("providers", {})
     legacy_model = providers.get("model")
     if legacy_model:
@@ -58,6 +66,26 @@ def build_agents(config: dict[str, Any], config_path: Path) -> dict[str, Any]:
     project_config = config.get("project", {})
     project_root = resolve_path(config_path, project_config.get("root", "."))
     project = ProjectContext(project_root, project_config)
+
+    def observer(stage: str, tool: str):
+        if not store or not task_id:
+            return None
+
+        def record(event: dict[str, Any]) -> None:
+            details = dict(event)
+            stdout = str(details.pop("stdout", ""))
+            stderr = str(details.pop("stderr", ""))
+            if stdout or stderr:
+                details["output"] = store.save_tool_output(
+                    task_id,
+                    stage,
+                    tool,
+                    stdout=stdout,
+                    stderr=stderr,
+                )
+            store.append_event(task_id, {"stage": stage, **details})
+
+        return record
 
     requirement_config = providers.get("requirement", {"type": "file"})
     requirement_type = requirement_config.get("type", "file")
@@ -85,6 +113,7 @@ def build_agents(config: dict[str, Any], config_path: Path) -> dict[str, Any]:
     elif analysis_type == "kimi":
         analysis_client = KimiCodeClient(
             project,
+            runner=SubprocessCommandRunner(observer("analysis", "kimi")),
             command=analysis_config.get("command", "kimi"),
             model=analysis_config.get("model"),
             timeout=int(analysis_config.get("timeout_seconds", 600)),
@@ -98,6 +127,11 @@ def build_agents(config: dict[str, Any], config_path: Path) -> dict[str, Any]:
     elif development_type == "claude":
         development_client = ClaudeCodeClient(
             project,
+            runner=SubprocessCommandRunner(observer("development", "claude")),
+            worktree_path=(store.run_dir(task_id) / "development-worktree")
+            if store and task_id
+            else None,
+            event_callback=observer("development", "git"),
             command=development_config.get("command", "claude"),
             model=development_config.get("model"),
             timeout=int(development_config.get("timeout_seconds", 900)),
@@ -111,6 +145,7 @@ def build_agents(config: dict[str, Any], config_path: Path) -> dict[str, Any]:
     elif review_type in {"kimi", "claude", "codex"}:
         review_client = ReviewClient(
             project,
+            runner=SubprocessCommandRunner(observer("review", review_type)),
             tool=review_type,
             command=review_config.get("command", review_type),
             model=review_config.get("model"),
@@ -152,6 +187,10 @@ def build_parser() -> argparse.ArgumentParser:
     status = subparsers.add_parser("status")
     add_config_argument(status)
     status.add_argument("--all", action="store_true", help="Include merged and rejected tasks")
+    logs = subparsers.add_parser("logs", help="Show task execution events")
+    add_config_argument(logs)
+    logs.add_argument("--task-id", required=True)
+    logs.add_argument("--follow", action="store_true", help="Wait for new events until terminal")
     return parser
 
 
@@ -233,7 +272,7 @@ def run_command(args: argparse.Namespace) -> dict[str, Any]:
     pipeline = config.get("pipeline", {})
     orchestrator = Orchestrator(
         store,
-        build_agents(config, config_path),
+        build_agents(config, config_path, store=store, task_id=task_id),
         max_retries=int(pipeline.get("max_retries", 1)),
         development_validator=build_development_validator(config, config_path),
     )
@@ -276,7 +315,7 @@ def revise_command(args: argparse.Namespace) -> dict[str, Any]:
     pipeline = config.get("pipeline", {})
     orchestrator = Orchestrator(
         store,
-        build_agents(config, config_path),
+        build_agents(config, config_path, store=store, task_id=args.task_id),
         max_retries=int(pipeline.get("max_retries", 1)),
         development_validator=build_development_validator(config, config_path),
     )
@@ -309,6 +348,32 @@ def status_command(args: argparse.Namespace) -> list[dict[str, Any]]:
     return rows
 
 
+def logs_command(args: argparse.Namespace) -> list[dict[str, Any]]:
+    _, _, store = load_runtime(args)
+    if not store.state_path(args.task_id).exists() and not store.read_events(args.task_id):
+        raise PipelineError(f"Run '{args.task_id}' does not exist", code="run_not_found")
+    displayed = 0
+    events: list[dict[str, Any]] = []
+    while True:
+        current = store.read_events(args.task_id)
+        for event in current[displayed:]:
+            print(json.dumps(event, ensure_ascii=False))
+        events = current
+        displayed = len(current)
+        if not args.follow:
+            return events
+        state = store.load_or_create(args.task_id)
+        settled = {
+            "failed",
+            "awaiting_human_review",
+            "needs_revision",
+            "ready_to_merge",
+        }
+        if state.status in TERMINAL_STATUSES | settled:
+            return events
+        time.sleep(0.5)
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(normalize_argv(argv))
     try:
@@ -317,11 +382,12 @@ def main(argv: list[str] | None = None) -> int:
             "approve": approve_command,
             "reject": reject_command,
             "status": status_command,
+            "logs": logs_command,
             "revise": revise_command,
             "merge": merge_command,
         }
         result = handlers[args.command](args)
-        if args.command != "status":
+        if args.command not in {"status", "logs"}:
             print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
     except PipelineError as exc:

@@ -31,6 +31,7 @@ class WorktreeExecutor:
 
     def approve(self, state: RunState) -> RunState:
         self._require_status(state, "awaiting_human_review")
+        self._event(state, "approval_started")
         decision = {
             "task_id": state.task_id,
             "decision": "approve",
@@ -55,6 +56,7 @@ class WorktreeExecutor:
                 "recoverable_with": f"dev-pipeline revise --task-id {state.task_id}",
             }
             self.store.save_state(state)
+            self._event(state, "approval_failed", message=str(exc))
             return state
 
     def reject(self, state: RunState) -> RunState:
@@ -69,6 +71,7 @@ class WorktreeExecutor:
         state.status = "rejected"
         state.error = None
         self.store.save_state(state)
+        self._event(state, "task_rejected")
         return state
 
     def cleanup_for_revision(self, state: RunState) -> None:
@@ -167,6 +170,7 @@ class WorktreeExecutor:
             ["worktree", "add", "-b", branch, str(worktree), base_commit],
             cwd=self.project_root,
         )
+        self._event(state, "approval_worktree_created", path=str(worktree))
 
     def _apply_patch(self, state: RunState) -> None:
         worktree = Path(state.metadata["worktree_path"])
@@ -177,6 +181,7 @@ class WorktreeExecutor:
         patch_path.write_text(patch_text, encoding="utf-8", newline="\n")
         self._git(["apply", "--check", str(patch_path)], cwd=worktree)
         self._git(["apply", str(patch_path)], cwd=worktree)
+        self._event(state, "patch_applied", patch=str(patch_path))
 
     def _verify(self, state: RunState) -> RunState:
         worktree = Path(state.metadata["worktree_path"])
@@ -187,6 +192,7 @@ class WorktreeExecutor:
                 results.append({"name": name, "command": None, "status": "skipped"})
                 continue
             started = time.monotonic()
+            self._event(state, "verification_command_started", name=name, command=command)
             try:
                 result = subprocess.run(
                     command,
@@ -205,8 +211,8 @@ class WorktreeExecutor:
                     "status": "passed" if result.returncode == 0 else "failed",
                     "exit_code": result.returncode,
                     "duration_seconds": round(time.monotonic() - started, 3),
-                    "stdout": result.stdout[-10_000:],
-                    "stderr": result.stderr[-10_000:],
+                    "stdout": self.store.redact(result.stdout[-10_000:]),
+                    "stderr": self.store.redact(result.stderr[-10_000:]),
                 }
             except subprocess.TimeoutExpired as exc:
                 record = {
@@ -215,11 +221,27 @@ class WorktreeExecutor:
                     "status": "failed",
                     "exit_code": None,
                     "duration_seconds": round(time.monotonic() - started, 3),
-                    "stdout": self._decode_timeout(exc.stdout),
-                    "stderr": self._decode_timeout(exc.stderr),
+                    "stdout": self.store.redact(self._decode_timeout(exc.stdout)),
+                    "stderr": self.store.redact(self._decode_timeout(exc.stderr)),
                     "message": f"Timed out after {self.command_timeout}s",
                 }
             results.append(record)
+            output = self.store.save_tool_output(
+                state.task_id,
+                "verification",
+                name,
+                stdout=str(record.get("stdout", "")),
+                stderr=str(record.get("stderr", "")),
+            )
+            self._event(
+                state,
+                "verification_command_finished",
+                name=name,
+                status=record["status"],
+                exit_code=record.get("exit_code"),
+                duration_seconds=record.get("duration_seconds"),
+                output=output,
+            )
             if record["status"] == "failed":
                 break
         passed = all(item["status"] in {"passed", "skipped"} for item in results)
@@ -239,6 +261,7 @@ class WorktreeExecutor:
         if passed:
             state.status = "ready_to_merge"
             state.error = None
+            self._event(state, "verification_completed", result="passed")
         else:
             failed = next(item for item in results if item["status"] == "failed")
             state.status = "needs_revision"
@@ -252,6 +275,7 @@ class WorktreeExecutor:
                 "occurred_at": utc_now(),
                 "recoverable_with": f"dev-pipeline revise --task-id {state.task_id}",
             }
+            self._event(state, "verification_completed", result="failed")
         self.store.save_state(state)
         return state
 
@@ -269,6 +293,9 @@ class WorktreeExecutor:
                 f"Run '{state.task_id}' is '{state.status}', expected '{expected}'",
                 code="invalid_state_transition",
             )
+
+    def _event(self, state: RunState, event: str, **details: Any) -> None:
+        self.store.append_event(state.task_id, {"event": event, **details})
 
     def _git(
         self,

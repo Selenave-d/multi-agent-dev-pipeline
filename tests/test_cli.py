@@ -3,7 +3,16 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from dev_pipeline.cli import build_agents, build_development_validator, main
+import pytest
+
+from dev_pipeline.cli import (
+    build_agents,
+    build_development_validator,
+    build_parser,
+    logs_command,
+    main,
+)
+from dev_pipeline.errors import PipelineError
 from dev_pipeline.providers import ZenTaoRequirementSource
 
 
@@ -78,6 +87,52 @@ def test_status_lists_non_terminal_tasks(tmp_path: Path, capsys) -> None:
     assert "ACTIVE-1" in output
     assert "1/4" in output
     assert "DONE-1" not in output
+
+
+def test_logs_prints_task_events(tmp_path: Path, capsys) -> None:
+    config = tmp_path / "config.json"
+    config.write_text(
+        json.dumps(
+            {
+                "pipeline": {"runs_dir": "runs"},
+                "providers": {"model": "demo", "requirement": "file"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    task = tmp_path / "runs" / "TASK-1"
+    task.mkdir(parents=True)
+    (task / "events.jsonl").write_text(
+        json.dumps({"timestamp": "now", "event": "stage_started", "stage": "analysis"})
+        + "\n",
+        encoding="utf-8",
+    )
+
+    assert main(["logs", "--config", str(config), "--task-id", "TASK-1"]) == 0
+    output = capsys.readouterr().out
+    assert '"event": "stage_started"' in output
+    assert '"stage": "analysis"' in output
+
+
+def test_logs_rejects_unknown_task(tmp_path: Path) -> None:
+    config = tmp_path / "config.json"
+    config.write_text(
+        json.dumps(
+            {
+                "pipeline": {"runs_dir": "runs"},
+                "providers": {"model": "demo", "requirement": "file"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    args = build_parser().parse_args(
+        ["logs", "--config", str(config), "--task-id", "MISSING"]
+    )
+
+    with pytest.raises(PipelineError) as error:
+        logs_command(args)
+
+    assert error.value.code == "run_not_found"
 
 
 def test_build_agents_injects_expected_zentao_product(tmp_path: Path) -> None:

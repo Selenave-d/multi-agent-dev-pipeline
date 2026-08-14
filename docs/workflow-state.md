@@ -1,8 +1,8 @@
 ## 活跃任务
 
-- id: development-quality-gate
-- type: bug
-- title: 增加无需修改判断和 diff 有效性校验
+- id: development-worktree-observability
+- type: feature
+- title: 由 Git 生成 development diff 并增加运行过程日志
 - current_stage: done
-- diagnosis_file: docs/debug/development-quality-gate-diagnosis.md
-- plan_file: docs/plans/development-quality-gate-fix-plan.md
+- requirements_file: docs/brainstorms/development-worktree-observability-requirements.md
+- plan_file: docs/plans/development-worktree-observability-plan.md

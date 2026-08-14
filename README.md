@@ -3,7 +3,7 @@
 一个面向小型开发团队的多 Agent 协作开发流程 MVP。当前版本跑通：
 
 ```text
-需求文件 → 需求标准化 → 需求分析 → 代码变更建议 → 独立 Review → 等待人工确认
+需求文件 → 需求标准化 → 需求分析 → 隔离 worktree 开发 → Git 生成补丁 → 独立 Review → 等待人工确认
 ```
 
 它支持离线 `demo` 回归，也可以把现有 AI 编程 CLI 包装成独立 Agent：禅道获取需求、Kimi Code 分析、Claude Code 生成补丁、Kimi/Claude/Codex Review。无论使用哪种工具，都不会自动应用 diff、提交或合并代码。
@@ -19,6 +19,8 @@
 - 确定性的离线端到端演示和自动化测试
 - 禅道只读适配器，以及 Kimi Code、Claude Code、Codex CLI 适配器
 - 每阶段独立 provider 配置，避免开发与 Review 共用隐式会话
+- 每个任务持久化 `events.jsonl` 和脱敏后的工具 stdout/stderr
+- `logs --follow` 实时查看阶段、重试、校验和命令执行进度
 
 ## 环境要求
 
@@ -44,6 +46,8 @@ runs/REQ-20260813-001/
 ├── 02_analysis.json
 ├── 03_code_changes.json
 ├── 04_review.json
+├── events.jsonl
+├── tool-output/
 └── run_state.json
 ```
 
@@ -51,6 +55,7 @@ runs/REQ-20260813-001/
 
 ```powershell
 dev-pipeline status --config config.json
+dev-pipeline logs --config config.json --task-id REQ-20260813-001 --follow
 dev-pipeline approve --config config.json --task-id REQ-20260813-001
 # approve 会展示 Review 摘要并等待 y/N；批准后创建隔离 worktree、应用补丁、运行验证
 dev-pipeline merge --config config.json --task-id REQ-20260813-001
@@ -117,8 +122,9 @@ class ModelClient(Protocol):
 
 ## 当前安全边界
 
-- 分析阶段只读取受限目录树；开发阶段只读取分析结果点名且在大小限制内的 UTF-8 文件。
-- 不执行模型返回的命令或 diff。
+- 分析阶段只读取受限目录树；开发阶段在从 HEAD 创建的临时 detached worktree 中运行。
+- Claude development 只开放 Read/Edit/Write/Glob/Grep，不开放 shell；diff 由 Git 生成。
+- 不执行模型返回的命令；临时 development worktree 在成功或失败后均清理。
 - 只有人工 `approve` 后才在隔离 worktree 应用 diff 和运行配置命令。
 - 只有人工 `merge` 后才提交任务分支并 `--no-ff` 合并；不自动推送远程。
 - 不把 API 密钥写入 JSON 产物。

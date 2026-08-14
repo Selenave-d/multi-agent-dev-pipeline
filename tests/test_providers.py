@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
 
 from dev_pipeline.errors import PipelineError, ValidationError
+from dev_pipeline.patches import PatchValidator
 from dev_pipeline.providers import (
     DEVELOPMENT_SCHEMA,
     ClaudeCodeClient,
@@ -22,9 +24,16 @@ def test_development_schema_is_strict() -> None:
 
 
 class FakeRunner:
-    def __init__(self, output: str, *, output_file: dict | None = None) -> None:
+    def __init__(
+        self,
+        output: str,
+        *,
+        output_file: dict | None = None,
+        edit: tuple[str, str] | None = None,
+    ) -> None:
         self.output = output
         self.output_file = output_file
+        self.edit = edit
         self.calls: list[dict] = []
 
     def run(self, command, *, cwd, input_text=None, timeout=600):
@@ -34,6 +43,8 @@ class FakeRunner:
         if self.output_file and "--output-last-message" in command:
             index = command.index("--output-last-message") + 1
             Path(command[index]).write_text(json.dumps(self.output_file), encoding="utf-8")
+        if self.edit:
+            (cwd / self.edit[0]).write_text(self.edit[1], encoding="utf-8")
         return self.output
 
 
@@ -84,6 +95,28 @@ def project(tmp_path: Path) -> ProjectContext:
     return ProjectContext(tmp_path, {"name": "test"})
 
 
+def git_project(tmp_path: Path) -> ProjectContext:
+    context = project(tmp_path)
+    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "add", "--all"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.test",
+            "commit",
+            "-m",
+            "init",
+        ],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    return context
+
+
 def test_kimi_analysis_builds_read_only_prompt_and_parses_jsonl(tmp_path: Path) -> None:
     result = {
         "task_id": "STORY-1",
@@ -116,27 +149,82 @@ def test_kimi_analysis_builds_read_only_prompt_and_parses_jsonl(tmp_path: Path) 
     assert "src/app.py" in prompt
 
 
-def test_claude_development_uses_schema_and_source_files(tmp_path: Path) -> None:
-    result = {
+def test_claude_development_edits_worktree_and_git_generates_diff(tmp_path: Path) -> None:
+    response = {
         "task_id": "STORY-1",
         "change_status": "changes_required",
-        "changes": [{"file": "src/app.py", "diff": "--- a\n+++ b"}],
         "commit_message": "feat: search",
     }
-    runner = FakeRunner(json.dumps({"structured_output": result}))
-    client = ClaudeCodeClient(project(tmp_path), runner=runner, model="sonnet")
+    runner = FakeRunner(
+        json.dumps({"structured_output": response}),
+        edit=("src/app.py", "print('changed')\n"),
+    )
+    worktree = tmp_path.parent / "development-worktree"
+    client = ClaudeCodeClient(
+        git_project(tmp_path), runner=runner, model="sonnet", worktree_path=worktree
+    )
 
-    assert client.generate("development", analysis_payload()) == result
+    result = client.generate("development", analysis_payload())
+
+    assert result["change_status"] == "changes_required"
+    assert result["changes"][0]["file"] == "src/app.py"
+    assert "-print('hello')" in result["changes"][0]["diff"]
+    assert "+print('changed')" in result["changes"][0]["diff"]
+    PatchValidator(tmp_path).validate(result)
+    assert not worktree.exists()
+    assert (tmp_path / "src/app.py").read_text(encoding="utf-8") == "print('hello')\n"
     call = runner.calls[0]
     command = call["command"]
     assert command[0:2] == ["claude", "-p"]
     assert "--json-schema" in command
-    assert command[command.index("--tools") + 1] == ""
+    assert command[command.index("--tools") + 1] == "Read,Edit,Write,Glob,Grep"
+    assert command[command.index("--allowedTools") + 1] == "Read,Edit,Write,Glob,Grep"
+    assert command[command.index("--permission-mode") + 1] == "acceptEdits"
     assert "--no-session-persistence" in command
     prompt = call["input_text"]
-    assert "不要修改工作区" in prompt
-    assert "print('hello')" in prompt
-    assert "不要修改工作区" not in " ".join(command)
+    assert "直接编辑 worktree" in prompt
+    assert "diff 由 Git 生成" in prompt
+
+
+def test_claude_development_accepts_noop_and_cleans_worktree(tmp_path: Path) -> None:
+    response = {
+        "task_id": "STORY-1",
+        "change_status": "already_satisfied",
+        "commit_message": "chore: no changes needed",
+    }
+    worktree = tmp_path.parent / "development-worktree"
+    client = ClaudeCodeClient(
+        git_project(tmp_path),
+        runner=FakeRunner(json.dumps({"structured_output": response})),
+        worktree_path=worktree,
+    )
+
+    result = client.generate("development", analysis_payload())
+
+    assert result["change_status"] == "already_satisfied"
+    assert result["changes"] == []
+    assert not worktree.exists()
+
+
+def test_claude_development_captures_new_files_in_git_diff(tmp_path: Path) -> None:
+    response = {
+        "task_id": "STORY-1",
+        "change_status": "changes_required",
+        "commit_message": "feat: add helper",
+    }
+    client = ClaudeCodeClient(
+        git_project(tmp_path),
+        runner=FakeRunner(
+            json.dumps({"structured_output": response}),
+            edit=("new.py", "value = 1\n"),
+        ),
+        worktree_path=tmp_path.parent / "development-worktree",
+    )
+
+    result = client.generate("development", analysis_payload())
+
+    assert result["changes"][0]["file"] == "new.py"
+    assert "new file mode" in result["changes"][0]["diff"]
 
 
 @pytest.mark.parametrize("tool", ["kimi", "claude"])
