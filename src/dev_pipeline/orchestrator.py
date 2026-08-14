@@ -5,7 +5,7 @@ from typing import Any
 
 from .agents import BaseAgent
 from .contracts import ARTIFACT_NAMES, STAGES, RunState, utc_now, validate_artifact
-from .errors import PipelineError, StageExecutionError
+from .errors import PipelineError, StageExecutionError, ValidationError
 from .storage import RunStore
 
 
@@ -130,6 +130,10 @@ class Orchestrator:
                 return
             except Exception as exc:  # boundary: adapters may raise arbitrary SDK errors
                 last_error = exc
+                retryable = not isinstance(exc, ValidationError) and not (
+                    isinstance(exc, PipelineError) and not exc.retryable
+                )
+                will_retry = retryable and attempt <= self.max_retries
                 if stage == "development":
                     context["development_validation_feedback"] = {
                         "type": type(exc).__name__,
@@ -142,8 +146,10 @@ class Orchestrator:
                     attempt=attempt,
                     error_type=type(exc).__name__,
                     message=str(exc),
-                    will_retry=attempt <= self.max_retries,
+                    will_retry=will_retry,
                 )
+                if not retryable:
+                    break
         state.status = "failed"
         state.error = {
             "stage": stage,

@@ -236,6 +236,7 @@ class PlaywrightBrowserVerifier:
             raise PipelineError(
                 f"Browser base URL is already in use before start_command: {self.base_url}",
                 code="browser_server_port_in_use",
+                retryable=False,
             )
         flags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
         log_handle = log_path.open("wb")

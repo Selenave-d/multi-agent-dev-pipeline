@@ -11,6 +11,7 @@ from dev_pipeline.contracts import RunState, utc_now
 from dev_pipeline.errors import PipelineError
 from dev_pipeline.execution import WorktreeExecutor
 from dev_pipeline.storage import RunStore
+from dev_pipeline.worklog import WorkLogResult
 
 TASK_ID = "TASK-001"
 
@@ -45,6 +46,21 @@ def make_state(store: RunStore) -> RunState:
         TASK_ID,
         status="awaiting_human_review",
         completed_stages=["requirement", "analysis", "development", "review"],
+    )
+    store.save_artifact(
+        state,
+        "requirement",
+        "01_requirement.json",
+        {
+            "task_id": TASK_ID,
+            "title": "修复应用内容",
+            "description": "更新应用内容",
+            "priority": "medium",
+            "module": "app",
+            "raw_data": {"type": "bug"},
+            "created_at": utc_now(),
+            "errors": [],
+        },
     )
     store.save_artifact(
         state,
@@ -110,6 +126,26 @@ class FakeBrowserVerifier:
         }
 
 
+class RecordingWorkLogSink:
+    def __init__(self, result: WorkLogResult | None = None) -> None:
+        self.result = result or WorkLogResult(
+            status="written",
+            path="daily.md",
+            entry="- [09:07] 修复: 应用内容",
+            reason="configured",
+        )
+        self.requirements: list[dict[str, object]] = []
+
+    def write(self, requirement: dict[str, object]) -> WorkLogResult:
+        self.requirements.append(requirement)
+        return self.result
+
+
+class FailingWorkLogSink:
+    def write(self, requirement: dict[str, object]) -> WorkLogResult:
+        raise OSError("Obsidian directory is read-only")
+
+
 def test_approve_applies_patch_verifies_and_merges(tmp_path: Path) -> None:
     repo = make_repo(tmp_path)
     store = RunStore(repo / "runs")
@@ -167,6 +203,69 @@ def test_verification_failure_needs_revision(tmp_path: Path) -> None:
     assert verification["result"] == "failed"
     assert len(verification["steps"]) == 1
     assert verification["steps"][0]["exit_code"] == 3
+
+
+def test_merge_records_written_worklog_event(tmp_path: Path) -> None:
+    repo = make_repo(tmp_path)
+    store = RunStore(repo / "runs")
+    state = make_state(store)
+    work_log = RecordingWorkLogSink()
+    executor = WorktreeExecutor(
+        store,
+        repo,
+        repo / "runs",
+        {},
+        work_log_sink=work_log,
+    )
+
+    merged = executor.merge(executor.approve(state))
+
+    assert merged.status == "merged"
+    assert work_log.requirements[0]["title"] == "修复应用内容"
+    assert store.read_events(TASK_ID)[-1]["event"] == "work_log_written"
+
+
+def test_merge_worklog_failure_does_not_change_merged_status(tmp_path: Path) -> None:
+    repo = make_repo(tmp_path)
+    store = RunStore(repo / "runs")
+    state = make_state(store)
+    executor = WorktreeExecutor(
+        store,
+        repo,
+        repo / "runs",
+        {},
+        work_log_sink=FailingWorkLogSink(),
+    )
+
+    merged = executor.merge(executor.approve(state))
+
+    assert merged.status == "merged"
+    persisted = store.load_or_create(TASK_ID)
+    assert persisted.status == "merged"
+    assert store.read_events(TASK_ID)[-1]["event"] == "work_log_failed"
+
+
+def test_merge_records_worklog_skip(tmp_path: Path) -> None:
+    repo = make_repo(tmp_path)
+    store = RunStore(repo / "runs")
+    state = make_state(store)
+    work_log = RecordingWorkLogSink(
+        WorkLogResult(status="skipped", reason="path_not_found")
+    )
+    executor = WorktreeExecutor(
+        store,
+        repo,
+        repo / "runs",
+        {},
+        work_log_sink=work_log,
+    )
+
+    merged = executor.merge(executor.approve(state))
+
+    assert merged.status == "merged"
+    event = store.read_events(TASK_ID)[-1]
+    assert event["event"] == "work_log_skipped"
+    assert event["reason"] == "path_not_found"
 
 
 def test_browser_verification_runs_after_commands_pass(tmp_path: Path) -> None:

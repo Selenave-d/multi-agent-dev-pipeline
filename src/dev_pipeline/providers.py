@@ -203,6 +203,7 @@ class ZenTaoRequirementSource:
                     f"'{product_code}', expected '{self.expected_product_code}'. "
                     "Correct project.zentao_product in config.",
                     code="product_mismatch",
+                    retryable=False,
                 )
         raw_data = {
             "id": item.get("id"),
@@ -632,6 +633,7 @@ class ClaudeCodeClient(CodingClientBase):
             raise PipelineError(
                 f"Project repository has uncommitted changes: {self.project.root}",
                 code="project_dirty",
+                retryable=False,
             )
         if self.worktree_path.exists():
             raise PipelineError(
@@ -691,6 +693,7 @@ class ClaudeCodeClient(CodingClientBase):
             raise PipelineError(
                 f"Formatter modified files outside the development change set: {unexpected}",
                 code="unexpected_format_changes",
+                retryable=False,
             )
         self._event(
             "development_format_completed",

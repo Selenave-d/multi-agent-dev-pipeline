@@ -40,6 +40,7 @@ def test_formatter_rejects_path_outside_worktree(tmp_path: Path) -> None:
         formatter.format(tmp_path, ["../outside.js"])
 
     assert error.value.code == "unsafe_format_path"
+    assert error.value.retryable is False
 
 
 def test_configured_formatter_expands_files_as_separate_arguments(tmp_path: Path) -> None:

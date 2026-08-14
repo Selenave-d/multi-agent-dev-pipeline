@@ -155,6 +155,7 @@ class DevelopmentFormatter:
                 raise PipelineError(
                     f"Formatter path escapes development worktree: {name}",
                     code="unsafe_format_path",
+                    retryable=False,
                 )
             if candidate.is_file():
                 safe.append(candidate.relative_to(worktree).as_posix())

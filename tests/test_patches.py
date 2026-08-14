@@ -143,6 +143,7 @@ def test_patch_validator_rejects_dirty_project(tmp_path: Path) -> None:
         PatchValidator(repo).validate(artifact("not a patch"))
 
     assert error.value.code == "project_dirty"
+    assert error.value.retryable is False
 
 
 def test_patch_validator_skips_legitimate_noop(tmp_path: Path) -> None:

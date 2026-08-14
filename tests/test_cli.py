@@ -16,6 +16,7 @@ from dev_pipeline.cli import (
 from dev_pipeline.errors import PipelineError
 from dev_pipeline.providers import ZenTaoRequirementSource
 from dev_pipeline.storage import RunStore
+from dev_pipeline.worklog import WorkLogWriter
 
 
 def test_cli_end_to_end(tmp_path: Path, capsys) -> None:
@@ -170,3 +171,23 @@ def test_build_executor_validates_enabled_browser_config(tmp_path: Path) -> None
 
     with pytest.raises(PipelineError, match="base_url"):
         build_executor(tmp_path / "config.json", config, RunStore(tmp_path / "runs"))
+
+
+def test_build_executor_configures_relative_worklog_path(tmp_path: Path) -> None:
+    config = {
+        "project": {"root": "."},
+        "pipeline": {
+            "runs_dir": "runs",
+            "worktree_dir": "runs",
+            "work_log": {"enabled": True, "path": "daily-logs"},
+        },
+    }
+
+    executor = build_executor(
+        tmp_path / "config.json",
+        config,
+        RunStore(tmp_path / "runs"),
+    )
+
+    assert isinstance(executor.work_log_sink, WorkLogWriter)
+    assert executor.work_log_sink.configured_path == (tmp_path / "daily-logs").resolve()

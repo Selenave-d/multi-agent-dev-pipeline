@@ -25,6 +25,7 @@ from .providers import (
     ZenTaoRequirementSource,
 )
 from .storage import RunStore
+from .worklog import WorkLogWriter
 
 COMMANDS = {"run", "approve", "reject", "status", "logs", "revise", "merge"}
 TERMINAL_STATUSES = {"merged", "rejected", "no_changes_needed"}
@@ -238,6 +239,22 @@ def build_executor(
     browser_verifier = None
     if browser_config.get("enabled", False):
         browser_verifier = PlaywrightBrowserVerifier(store, browser_config)
+    work_log_config = pipeline.get("work_log", {})
+    if not isinstance(work_log_config, dict):
+        raise ValidationError("'pipeline.work_log' must be a JSON object")
+    configured_work_log_path = work_log_config.get("path")
+    if configured_work_log_path is not None and not isinstance(configured_work_log_path, str):
+        raise ValidationError("'pipeline.work_log.path' must be a string")
+    work_log_path = (
+        resolve_path(config_path, configured_work_log_path)
+        if configured_work_log_path
+        else None
+    )
+    work_log_sink = WorkLogWriter(
+        project_root,
+        configured_path=work_log_path,
+        enabled=bool(work_log_config.get("enabled", True)),
+    )
     return WorktreeExecutor(
         store,
         project_root,
@@ -249,6 +266,7 @@ def build_executor(
         },
         command_timeout=int(pipeline.get("command_timeout_seconds", 1200)),
         browser_verifier=browser_verifier,
+        work_log_sink=work_log_sink,
     )
 
 

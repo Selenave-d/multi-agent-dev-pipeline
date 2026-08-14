@@ -83,6 +83,21 @@ dev-pipeline logs --config config.json --task-id BUG-6810 --follow
 - 某项无需执行时设置为 `null`，记录为 `skipped`。
 - `approve` 前要求目标仓库干净且位于普通分支；`merge` 前再次检查主分支和基准提交没有变化。
 
+Merge 成功后 Pipeline 会尝试同步 Obsidian 工作日志。默认依次读取项目级和全局 Claude memory 的 `obsidian-log-path.md`；也可显式覆盖或关闭：
+
+```json
+{
+  "pipeline": {
+    "work_log": {
+      "enabled": true,
+      "path": "D:/Obsidian/Work/Daily_Logs"
+    }
+  }
+}
+```
+
+日志条目来自 requirement 标题，按 bug/story/其他写成“修复/实现/优化”，不会调用模型。找不到路径时记录 `work_log_skipped`；写入失败记录 `work_log_failed`。两者都不会改变已经成功的 `merged` 状态。
+
 ## 外置页面点击与 E2E 验收
 
 浏览器驱动属于 Pipeline，不会在 `project.root` 中创建 Playwright/Cypress 文件。安装一次：

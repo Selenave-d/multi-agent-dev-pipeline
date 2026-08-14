@@ -10,6 +10,7 @@ from .browser import BrowserVerifier
 from .contracts import DECISION_ARTIFACT, VERIFICATION_ARTIFACT, RunState, utc_now
 from .errors import PipelineError, ValidationError
 from .storage import RunStore
+from .worklog import WorkLogSink
 
 
 class WorktreeExecutor:
@@ -24,6 +25,7 @@ class WorktreeExecutor:
         *,
         command_timeout: int = 1200,
         browser_verifier: BrowserVerifier | None = None,
+        work_log_sink: WorkLogSink | None = None,
     ) -> None:
         self.store = store
         self.project_root = project_root.resolve()
@@ -31,6 +33,7 @@ class WorktreeExecutor:
         self.commands = commands
         self.command_timeout = command_timeout
         self.browser_verifier = browser_verifier
+        self.work_log_sink = work_log_sink
 
     def approve(self, state: RunState) -> RunState:
         self._require_status(state, "awaiting_human_review")
@@ -141,7 +144,36 @@ class WorktreeExecutor:
             ["rev-parse", "HEAD"], cwd=self.project_root
         )
         self.store.save_state(state)
+        self._sync_work_log(state)
         return state
+
+    def _sync_work_log(self, state: RunState) -> None:
+        try:
+            if self.work_log_sink is None:
+                self._event(state, "work_log_skipped", reason="disabled")
+                return
+            requirement = self.store.load_artifact(state, "requirement")
+            result = self.work_log_sink.write(requirement)
+            if result.status == "written":
+                self._event(
+                    state,
+                    "work_log_written",
+                    path=result.path,
+                    entry=result.entry,
+                    source=result.reason,
+                )
+            else:
+                self._event(state, "work_log_skipped", reason=result.reason)
+        except Exception as exc:
+            try:
+                self._event(
+                    state,
+                    "work_log_failed",
+                    error_type=type(exc).__name__,
+                    message=str(exc),
+                )
+            except Exception:
+                pass
 
     def _prepare_worktree(self, state: RunState) -> None:
         if not (self.project_root / ".git").exists():
@@ -150,6 +182,7 @@ class WorktreeExecutor:
             raise PipelineError(
                 "Project worktree must be clean before approval",
                 code="project_dirty",
+                retryable=False,
             )
         base_branch = self._git_text(["branch", "--show-current"], cwd=self.project_root)
         if not base_branch:

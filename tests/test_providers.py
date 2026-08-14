@@ -240,6 +240,34 @@ def test_claude_development_captures_new_files_in_git_diff(tmp_path: Path) -> No
     assert "new file mode" in result["changes"][0]["diff"]
 
 
+def test_claude_development_rejects_dirty_project_without_retry(tmp_path: Path) -> None:
+    context = git_project(tmp_path)
+    (tmp_path / "src" / "app.py").write_text("dirty\n", encoding="utf-8")
+    runner = FakeRunner(
+        json.dumps(
+            {
+                "structured_output": {
+                    "task_id": "STORY-1",
+                    "change_status": "changes_required",
+                    "commit_message": "feat: change",
+                }
+            }
+        )
+    )
+    client = ClaudeCodeClient(
+        context,
+        runner=runner,
+        worktree_path=tmp_path.parent / "development-worktree",
+    )
+
+    with pytest.raises(PipelineError) as error:
+        client.generate("development", analysis_payload())
+
+    assert error.value.code == "project_dirty"
+    assert error.value.retryable is False
+    assert runner.calls == []
+
+
 class ExpandingFormatter:
     def format(self, worktree: Path, files: list[str]) -> FormatResult:
         (worktree / "formatter-created.txt").write_text(
@@ -269,6 +297,7 @@ def test_claude_rejects_formatter_changes_outside_original_set(tmp_path: Path) -
         client.generate("development", analysis_payload())
 
     assert error.value.code == "unexpected_format_changes"
+    assert error.value.retryable is False
     assert (worktree.parent / "development.raw.patch").is_file()
     assert not worktree.exists()
 
@@ -432,6 +461,7 @@ def test_zentao_product_code_mismatch_stops_requirement(tmp_path: Path) -> None:
         source.fetch("bug:6043")
 
     assert error.value.code == "product_mismatch"
+    assert error.value.retryable is False
     assert "DTS" in str(error.value)
     assert "BV-GIS-AR" in str(error.value)
     assert "bug:6043" in str(error.value)

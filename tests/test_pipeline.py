@@ -314,3 +314,61 @@ def test_orchestrator_defaults_to_three_retries(tmp_path: Path) -> None:
     orchestrator = Orchestrator(RunStore(tmp_path / "runs"), make_agents())
 
     assert orchestrator.max_retries == 3
+
+
+class RaisingAgent:
+    def __init__(self, error: Exception) -> None:
+        self.error = error
+
+    def execute(self, input_data):
+        raise self.error
+
+
+def test_non_retryable_pipeline_error_fails_after_one_attempt(tmp_path: Path) -> None:
+    store = RunStore(tmp_path / "runs")
+    orchestrator = Orchestrator(
+        store,
+        {"requirement": RaisingAgent(PipelineError("bad config", retryable=False))},
+        max_retries=3,
+    )
+
+    with pytest.raises(StageExecutionError, match="bad config"):
+        orchestrator.run("ref", "NON-RETRYABLE")
+
+    state = store.load_or_create("NON-RETRYABLE")
+    assert state.attempts["requirement"] == 1
+    failed = [
+        event
+        for event in store.read_events(state.task_id)
+        if event["event"] == "stage_attempt_failed"
+    ]
+    assert len(failed) == 1
+    assert failed[0]["will_retry"] is False
+
+
+def test_retryable_pipeline_error_uses_all_attempts(tmp_path: Path) -> None:
+    store = RunStore(tmp_path / "runs")
+    orchestrator = Orchestrator(
+        store,
+        {"requirement": RaisingAgent(PipelineError("temporary"))},
+        max_retries=2,
+    )
+
+    with pytest.raises(StageExecutionError, match="temporary"):
+        orchestrator.run("ref", "RETRYABLE")
+
+    assert store.load_or_create("RETRYABLE").attempts["requirement"] == 3
+
+
+def test_validation_error_fails_after_one_attempt(tmp_path: Path) -> None:
+    store = RunStore(tmp_path / "runs")
+    orchestrator = Orchestrator(
+        store,
+        {"requirement": RaisingAgent(ValidationError("invalid artifact"))},
+        max_retries=3,
+    )
+
+    with pytest.raises(StageExecutionError, match="invalid artifact"):
+        orchestrator.run("ref", "VALIDATION")
+
+    assert store.load_or_create("VALIDATION").attempts["requirement"] == 1

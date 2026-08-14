@@ -39,6 +39,7 @@ class PatchValidator:
             raise PipelineError(
                 f"Project repository has uncommitted changes: {self.project_root}",
                 code="project_dirty",
+                retryable=False,
             )
         patch = "\n".join(str(change["diff"]).rstrip() for change in artifact["changes"]) + "\n"
         with tempfile.TemporaryDirectory(prefix="pipeline-validator-") as temp_dir:

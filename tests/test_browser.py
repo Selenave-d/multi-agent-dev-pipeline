@@ -143,6 +143,7 @@ def test_browser_refuses_to_reuse_an_occupied_base_url(
         verifier._start_server(tmp_path, tmp_path / "server.log")
 
     assert error.value.code == "browser_server_port_in_use"
+    assert error.value.retryable is False
 
 
 def test_browser_environment_requires_string_values(tmp_path: Path) -> None:
