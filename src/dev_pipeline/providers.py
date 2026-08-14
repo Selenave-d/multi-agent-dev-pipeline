@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from .errors import PipelineError, ValidationError
+from .formatting import DevelopmentFormatter
 from .storage import RunStore
 
 
@@ -560,10 +561,12 @@ class ClaudeCodeClient(CodingClientBase):
         project: ProjectContext,
         *,
         worktree_path: Path | None = None,
+        formatter: DevelopmentFormatter | None = None,
         event_callback: Callable[[dict[str, Any]], None] | None = None,
         **kwargs: Any,
     ) -> None:
         self.worktree_path = (worktree_path or project.root / ".pipeline-development").resolve()
+        self.formatter = formatter or DevelopmentFormatter(project.root)
         self.event_callback = event_callback
         super().__init__(project, command=kwargs.pop("command", "claude"), **kwargs)
 
@@ -654,9 +657,11 @@ class ClaudeCodeClient(CodingClientBase):
 
     def _build_development_artifact(self, response: dict[str, Any]) -> dict[str, Any]:
         self._git(["add", "--intent-to-add", "--all"], self.worktree_path)
-        patch = self._git(["diff", "--binary", "HEAD", "--"], self.worktree_path).stdout
-        files = self._git_text(["diff", "--name-only", "HEAD", "--"], self.worktree_path)
-        has_changes = bool(patch.strip())
+        raw_patch = self._git(["diff", "--binary", "HEAD", "--"], self.worktree_path).stdout
+        raw_patch_path = self.worktree_path.parent / "development.raw.patch"
+        self._write_patch(raw_patch_path, raw_patch)
+        files = self._changed_files()
+        has_changes = bool(raw_patch.strip())
         declared = response.get("change_status")
         if declared == "already_satisfied" and has_changes:
             raise PipelineError(
@@ -668,16 +673,75 @@ class ClaudeCodeClient(CodingClientBase):
                 "Claude declared changes_required but made no worktree changes",
                 code="empty_generated_change",
             )
+        self._event("development_format_started", files=files)
+        try:
+            format_result = self.formatter.format(self.worktree_path, files)
+        except Exception as exc:
+            self._event(
+                "development_format_failed",
+                error_type=type(exc).__name__,
+                message=str(exc),
+            )
+            raise
+        self._git(["add", "--intent-to-add", "--all"], self.worktree_path)
+        formatted_files = self._changed_files()
+        unexpected = sorted(set(formatted_files) - set(files))
+        if unexpected:
+            self._event("development_format_failed", unexpected_files=unexpected)
+            raise PipelineError(
+                f"Formatter modified files outside the development change set: {unexpected}",
+                code="unexpected_format_changes",
+            )
+        self._event(
+            "development_format_completed",
+            tool=format_result.tool,
+            files=format_result.files,
+            stdout=format_result.stdout,
+            stderr=format_result.stderr,
+        )
+        patch = self._git(["diff", "--binary", "HEAD", "--"], self.worktree_path).stdout
+        patch_path = self.worktree_path.parent / "development.patch"
+        self._write_patch(patch_path, patch)
+        if declared == "changes_required" and not patch.strip():
+            raise PipelineError(
+                "Development changes became empty after formatting",
+                code="empty_generated_change",
+            )
         changes = []
-        if has_changes:
-            changes.append({"file": ", ".join(files.splitlines()), "diff": patch})
-        self._event("development_diff_generated", files=files.splitlines())
+        if patch.strip():
+            changes.append({"file": ", ".join(formatted_files), "diff": patch})
+        self._event(
+            "development_diff_generated",
+            files=formatted_files,
+            raw_patch=str(raw_patch_path),
+            patch=str(patch_path),
+        )
         return {
             "task_id": response.get("task_id"),
             "change_status": declared,
             "changes": changes,
             "commit_message": response.get("commit_message"),
         }
+
+    def _changed_files(self) -> list[str]:
+        output = self._git(
+            ["diff", "--name-only", "-z", "HEAD", "--"], self.worktree_path
+        ).stdout
+        return [name for name in output.split("\0") if name]
+
+    @staticmethod
+    def _write_patch(path: Path, patch: str) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent, text=True)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+                handle.write(patch)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp_name, path)
+        finally:
+            if os.path.exists(temp_name):
+                os.unlink(temp_name)
 
     def _git(
         self,

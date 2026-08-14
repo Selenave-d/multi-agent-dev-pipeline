@@ -8,12 +8,14 @@ import pytest
 from dev_pipeline.cli import (
     build_agents,
     build_development_validator,
+    build_executor,
     build_parser,
     logs_command,
     main,
 )
 from dev_pipeline.errors import PipelineError
 from dev_pipeline.providers import ZenTaoRequirementSource
+from dev_pipeline.storage import RunStore
 
 
 def test_cli_end_to_end(tmp_path: Path, capsys) -> None:
@@ -158,3 +160,13 @@ def test_legacy_demo_config_does_not_enable_patch_validation(tmp_path: Path) -> 
     config = {"providers": {"model": "demo", "requirement": "file"}}
 
     assert build_development_validator(config, tmp_path / "config.json") is None
+
+
+def test_build_executor_validates_enabled_browser_config(tmp_path: Path) -> None:
+    config = {
+        "project": {"root": "."},
+        "pipeline": {"browser": {"enabled": True, "start_command": "npm run serve"}},
+    }
+
+    with pytest.raises(PipelineError, match="base_url"):
+        build_executor(tmp_path / "config.json", config, RunStore(tmp_path / "runs"))

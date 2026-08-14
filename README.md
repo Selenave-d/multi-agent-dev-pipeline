@@ -21,6 +21,7 @@
 - 每阶段独立 provider 配置，避免开发与 Review 共用隐式会话
 - 每个任务持久化 `events.jsonl` 和脱敏后的工具 stdout/stderr
 - `logs --follow` 实时查看阶段、重试、校验和命令执行进度
+- 可选的外置 Playwright 页面验收，不向业务项目写入 E2E 测试文件
 
 ## 环境要求
 
@@ -51,13 +52,20 @@ runs/REQ-20260813-001/
 └── run_state.json
 ```
 
+需要启用页面点击验收时，额外安装 Pipeline 自己的浏览器依赖：
+
+```powershell
+.\.venv\Scripts\python -m pip install -e ".[dev,browser]"
+.\.venv\Scripts\python -m playwright install chromium
+```
+
 人工确认并执行：
 
 ```powershell
 dev-pipeline status --config config.json
 dev-pipeline logs --config config.json --task-id REQ-20260813-001 --follow
 dev-pipeline approve --config config.json --task-id REQ-20260813-001
-# approve 会展示 Review 摘要并等待 y/N；批准后创建隔离 worktree、应用补丁、运行验证
+# approve 会展示 Review 摘要并等待 y/N；批准后创建隔离 worktree、应用补丁、运行命令和浏览器验证
 dev-pipeline merge --config config.json --task-id REQ-20260813-001
 ```
 
@@ -124,8 +132,11 @@ class ModelClient(Protocol):
 
 - 分析阶段只读取受限目录树；开发阶段在从 HEAD 创建的临时 detached worktree 中运行。
 - Claude development 只开放 Read/Edit/Write/Glob/Grep，不开放 shell；diff 由 Git 生成。
+- 最新 development 候选会保存在 `runs/<task_id>/development.patch`，校验与批准应用均使用 `git apply --3way`。
+- Claude 原始修改保存在 `development.raw.patch`；Pipeline 只对 changed files 自动补齐末尾换行，并在可用时调用项目本地 formatter 后生成最终 `development.patch`。
 - 不执行模型返回的命令；临时 development worktree 在成功或失败后均清理。
 - 只有人工 `approve` 后才在隔离 worktree 应用 diff 和运行配置命令。
+- 页面点击验收由 Pipeline 自带 Playwright 在批准 worktree 中运行；截图和服务日志仅写入对应 run 目录。
 - 只有人工 `merge` 后才提交任务分支并 `--no-ff` 合并；不自动推送远程。
 - 不把 API 密钥写入 JSON 产物。
 - 禅道写回、人工批准和 Git Agent 留到下一阶段实现。

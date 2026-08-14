@@ -30,6 +30,7 @@ def make_repo(tmp_path: Path) -> Path:
     repo = tmp_path / "project"
     repo.mkdir()
     git(repo, "init", "-b", "main")
+    git(repo, "config", "core.autocrlf", "false")
     git(repo, "config", "user.name", "Pipeline Test")
     git(repo, "config", "user.email", "pipeline@example.test")
     (repo / ".gitignore").write_text("runs/\n", encoding="utf-8")
@@ -90,6 +91,25 @@ def python_command(source: str) -> str:
     return f'"{sys.executable}" -c "{source}"'
 
 
+class FakeBrowserVerifier:
+    def __init__(self, status: str = "passed") -> None:
+        self.status = status
+        self.calls: list[tuple[str, Path]] = []
+
+    def verify(self, task_id: str, worktree: Path) -> dict[str, object]:
+        self.calls.append((task_id, worktree))
+        return {
+            "name": "browser",
+            "command": "external browser",
+            "status": self.status,
+            "exit_code": 0 if self.status == "passed" else 1,
+            "duration_seconds": 0.1,
+            "stdout": "browser output",
+            "stderr": "" if self.status == "passed" else "page assertion failed",
+            "scenarios": [],
+        }
+
+
 def test_approve_applies_patch_verifies_and_merges(tmp_path: Path) -> None:
     repo = make_repo(tmp_path)
     store = RunStore(repo / "runs")
@@ -147,6 +167,71 @@ def test_verification_failure_needs_revision(tmp_path: Path) -> None:
     assert verification["result"] == "failed"
     assert len(verification["steps"]) == 1
     assert verification["steps"][0]["exit_code"] == 3
+
+
+def test_browser_verification_runs_after_commands_pass(tmp_path: Path) -> None:
+    repo = make_repo(tmp_path)
+    store = RunStore(repo / "runs")
+    state = make_state(store)
+    browser = FakeBrowserVerifier()
+    executor = WorktreeExecutor(
+        store,
+        repo,
+        repo / "runs",
+        {},
+        browser_verifier=browser,
+    )
+
+    approved = executor.approve(state)
+
+    assert approved.status == "ready_to_merge"
+    assert browser.calls == [(TASK_ID, Path(approved.metadata["worktree_path"]))]
+    verification = store.load_artifact(approved, "verification")
+    assert [step["name"] for step in verification["steps"]] == [
+        "lint",
+        "test",
+        "build",
+        "browser",
+    ]
+
+
+def test_browser_failure_needs_revision(tmp_path: Path) -> None:
+    repo = make_repo(tmp_path)
+    store = RunStore(repo / "runs")
+    state = make_state(store)
+    browser = FakeBrowserVerifier("failed")
+    executor = WorktreeExecutor(
+        store,
+        repo,
+        repo / "runs",
+        {},
+        browser_verifier=browser,
+    )
+
+    failed = executor.approve(state)
+
+    assert failed.status == "needs_revision"
+    assert failed.error["stage"] == "verification"
+    assert "browser failed" in failed.error["message"]
+
+
+def test_browser_does_not_run_after_command_failure(tmp_path: Path) -> None:
+    repo = make_repo(tmp_path)
+    store = RunStore(repo / "runs")
+    state = make_state(store)
+    browser = FakeBrowserVerifier()
+    executor = WorktreeExecutor(
+        store,
+        repo,
+        repo / "runs",
+        {"lint": python_command("import sys; sys.exit(1)")},
+        browser_verifier=browser,
+    )
+
+    failed = executor.approve(state)
+
+    assert failed.status == "needs_revision"
+    assert browser.calls == []
 
 
 def test_reject_records_decision_without_worktree(tmp_path: Path) -> None:

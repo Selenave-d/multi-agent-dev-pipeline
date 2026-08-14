@@ -6,6 +6,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from .browser import BrowserVerifier
 from .contracts import DECISION_ARTIFACT, VERIFICATION_ARTIFACT, RunState, utc_now
 from .errors import PipelineError, ValidationError
 from .storage import RunStore
@@ -22,12 +23,14 @@ class WorktreeExecutor:
         commands: dict[str, str],
         *,
         command_timeout: int = 1200,
+        browser_verifier: BrowserVerifier | None = None,
     ) -> None:
         self.store = store
         self.project_root = project_root.resolve()
         self.worktree_root = worktree_root.resolve()
         self.commands = commands
         self.command_timeout = command_timeout
+        self.browser_verifier = browser_verifier
 
     def approve(self, state: RunState) -> RunState:
         self._require_status(state, "awaiting_human_review")
@@ -179,8 +182,10 @@ class WorktreeExecutor:
         patch_text = "\n".join(diffs) + "\n"
         patch_path = self.store.run_dir(state.task_id) / "changes.patch"
         patch_path.write_text(patch_text, encoding="utf-8", newline="\n")
-        self._git(["apply", "--check", str(patch_path)], cwd=worktree)
-        self._git(["apply", str(patch_path)], cwd=worktree)
+        self._git(
+            ["apply", "--3way", "--ignore-space-change", str(patch_path)],
+            cwd=worktree,
+        )
         self._event(state, "patch_applied", patch=str(patch_path))
 
     def _verify(self, state: RunState) -> RunState:
@@ -244,6 +249,39 @@ class WorktreeExecutor:
             )
             if record["status"] == "failed":
                 break
+        if self.browser_verifier and all(
+            item["status"] in {"passed", "skipped"} for item in results
+        ):
+            self._event(state, "verification_command_started", name="browser")
+            try:
+                record = self.browser_verifier.verify(state.task_id, worktree)
+            except Exception as exc:
+                record = {
+                    "name": "browser",
+                    "command": None,
+                    "status": "failed",
+                    "exit_code": None,
+                    "duration_seconds": 0,
+                    "stdout": "",
+                    "stderr": self.store.redact(str(exc)),
+                }
+            results.append(record)
+            output = self.store.save_tool_output(
+                state.task_id,
+                "verification",
+                "browser",
+                stdout=str(record.get("stdout", "")),
+                stderr=str(record.get("stderr", "")),
+            )
+            self._event(
+                state,
+                "verification_command_finished",
+                name="browser",
+                status=record["status"],
+                exit_code=record.get("exit_code"),
+                duration_seconds=record.get("duration_seconds"),
+                output=output,
+            )
         passed = all(item["status"] in {"passed", "skipped"} for item in results)
         verification = {
             "task_id": state.task_id,

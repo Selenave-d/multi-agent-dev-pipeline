@@ -23,7 +23,7 @@
 
 ## 验收
 
-- Claude 返回结构化状态，实际 changes/diff 由 Git 生成且可通过 `git apply --check`。
+- Claude 返回结构化状态，实际 changes/diff 由 Git 生成且可通过隔离 worktree 中的 `git apply --3way`。
 - 新文件、多文件和无修改场景均有测试。
 - 阶段开始、重试、失败/完成和工具输出路径可在事件日志中追踪。
 - `logs` 可读取既有事件，`--follow` 可等待新增事件直到任务终态。

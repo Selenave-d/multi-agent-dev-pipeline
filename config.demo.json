@@ -6,7 +6,7 @@
   "pipeline": {
     "runs_dir": "runs",
     "worktree_dir": "runs",
-    "max_retries": 1,
+    "max_retries": 3,
     "commands": {
       "lint": null,
       "test": null,

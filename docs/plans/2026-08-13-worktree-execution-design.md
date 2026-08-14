@@ -18,7 +18,7 @@ awaiting_human_review
 
 ## Git 边界
 
-批准时要求目标仓库干净且处于普通分支。Pipeline 基于当前 HEAD 创建 `pipeline/<task-id>` 分支，并在 `runs/<task-id>/worktree` 建立 worktree。补丁先用 `git apply --check` 校验，再正式应用。
+批准时要求目标仓库干净且处于普通分支。Pipeline 基于当前 HEAD 创建 `pipeline/<task-id>` 分支，并在 `runs/<task-id>/worktree` 建立 worktree。补丁在一次性 worktree 中用 `git apply --3way` 校验，批准后再以相同策略正式应用。
 
 验证成功后不立即提交。`merge` 命令再次要求主工作区干净、仍在原分支、HEAD 仍等于批准时的基准提交；之后在任务 worktree 提交变更，并用 `git merge --no-ff` 合并。发生冲突会中止 merge，不自动解决、不强制覆盖，也不推送远程。
 

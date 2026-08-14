@@ -15,7 +15,7 @@ class Orchestrator:
         store: RunStore,
         agents: dict[str, BaseAgent],
         *,
-        max_retries: int = 1,
+        max_retries: int = 3,
         development_validator: Any | None = None,
     ) -> None:
         self.store = store

@@ -24,12 +24,32 @@
   "pipeline": {
     "runs_dir": "runs",
     "worktree_dir": "runs",
-    "max_retries": 1,
+    "max_retries": 3,
     "command_timeout_seconds": 1200,
     "commands": {
       "lint": "npm run lint",
       "test": "npm run test",
       "build": "npm run build"
+    },
+    "browser": {
+      "enabled": false,
+      "start_command": "npm run serve",
+      "base_url": "http://127.0.0.1:8080",
+      "environment": {"HOST": "127.0.0.1", "PORT": "8080"},
+      "startup_timeout_seconds": 120,
+      "action_timeout_seconds": 15,
+      "headless": true,
+      "screenshots": "on_failure",
+      "scenarios": [
+        {
+          "name": "首页基本交互",
+          "path": "/",
+          "actions": [
+            {"action": "click", "selector": "text=登录"},
+            {"action": "expect_visible", "selector": ".login-form"}
+          ]
+        }
+      ]
     }
   },
   "providers": {

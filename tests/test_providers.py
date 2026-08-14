@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from dev_pipeline.errors import PipelineError, ValidationError
+from dev_pipeline.formatting import FormatResult
 from dev_pipeline.patches import PatchValidator
 from dev_pipeline.providers import (
     DEVELOPMENT_SCHEMA,
@@ -92,12 +93,19 @@ def project(tmp_path: Path) -> ProjectContext:
     source = tmp_path / "src"
     source.mkdir()
     (source / "app.py").write_text("print('hello')\n", encoding="utf-8")
+    (tmp_path / "other.txt").write_text("unchanged\n", encoding="utf-8")
     return ProjectContext(tmp_path, {"name": "test"})
 
 
 def git_project(tmp_path: Path) -> ProjectContext:
     context = project(tmp_path)
     subprocess.run(["git", "init", "-b", "main"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "core.autocrlf", "false"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
     subprocess.run(["git", "add", "--all"], cwd=tmp_path, check=True, capture_output=True)
     subprocess.run(
         [
@@ -157,7 +165,7 @@ def test_claude_development_edits_worktree_and_git_generates_diff(tmp_path: Path
     }
     runner = FakeRunner(
         json.dumps({"structured_output": response}),
-        edit=("src/app.py", "print('changed')\n"),
+        edit=("src/app.py", "print('changed')"),
     )
     worktree = tmp_path.parent / "development-worktree"
     client = ClaudeCodeClient(
@@ -170,7 +178,12 @@ def test_claude_development_edits_worktree_and_git_generates_diff(tmp_path: Path
     assert result["changes"][0]["file"] == "src/app.py"
     assert "-print('hello')" in result["changes"][0]["diff"]
     assert "+print('changed')" in result["changes"][0]["diff"]
+    assert "No newline at end of file" not in result["changes"][0]["diff"]
     PatchValidator(tmp_path).validate(result)
+    saved_patch = worktree.parent / "development.patch"
+    assert saved_patch.read_text(encoding="utf-8") == result["changes"][0]["diff"]
+    raw_patch = (worktree.parent / "development.raw.patch").read_text(encoding="utf-8")
+    assert "No newline at end of file" in raw_patch
     assert not worktree.exists()
     assert (tmp_path / "src/app.py").read_text(encoding="utf-8") == "print('hello')\n"
     call = runner.calls[0]
@@ -225,6 +238,39 @@ def test_claude_development_captures_new_files_in_git_diff(tmp_path: Path) -> No
 
     assert result["changes"][0]["file"] == "new.py"
     assert "new file mode" in result["changes"][0]["diff"]
+
+
+class ExpandingFormatter:
+    def format(self, worktree: Path, files: list[str]) -> FormatResult:
+        (worktree / "formatter-created.txt").write_text(
+            "formatter created this\n", encoding="utf-8"
+        )
+        return FormatResult(tool="test", files=files)
+
+
+def test_claude_rejects_formatter_changes_outside_original_set(tmp_path: Path) -> None:
+    response = {
+        "task_id": "STORY-1",
+        "change_status": "changes_required",
+        "commit_message": "feat: search",
+    }
+    worktree = tmp_path.parent / "development-worktree"
+    client = ClaudeCodeClient(
+        git_project(tmp_path),
+        runner=FakeRunner(
+            json.dumps({"structured_output": response}),
+            edit=("src/app.py", "print('changed')"),
+        ),
+        formatter=ExpandingFormatter(),
+        worktree_path=worktree,
+    )
+
+    with pytest.raises(PipelineError) as error:
+        client.generate("development", analysis_payload())
+
+    assert error.value.code == "unexpected_format_changes"
+    assert (worktree.parent / "development.raw.patch").is_file()
+    assert not worktree.exists()
 
 
 @pytest.mark.parametrize("tool", ["kimi", "claude"])

@@ -8,8 +8,10 @@ from pathlib import Path
 from typing import Any
 
 from .agents import ModelAgent, RequirementAgent
+from .browser import PlaywrightBrowserVerifier
 from .errors import PipelineError, ValidationError
 from .execution import WorktreeExecutor
+from .formatting import DevelopmentFormatter
 from .orchestrator import Orchestrator, resolve_runs_dir
 from .patches import PatchValidator
 from .providers import (
@@ -66,6 +68,8 @@ def build_agents(
     project_config = config.get("project", {})
     project_root = resolve_path(config_path, project_config.get("root", "."))
     project = ProjectContext(project_root, project_config)
+    pipeline_config = config.get("pipeline", {})
+    pipeline_commands = pipeline_config.get("commands", {})
 
     def observer(stage: str, tool: str):
         if not store or not task_id:
@@ -125,6 +129,7 @@ def build_agents(
     if development_type == "demo":
         development_client = demo
     elif development_type == "claude":
+        format_is_configured = "format" in pipeline_commands
         development_client = ClaudeCodeClient(
             project,
             runner=SubprocessCommandRunner(observer("development", "claude")),
@@ -132,6 +137,12 @@ def build_agents(
             if store and task_id
             else None,
             event_callback=observer("development", "git"),
+            formatter=DevelopmentFormatter(
+                project_root,
+                command=pipeline_commands.get("format"),
+                auto_detect=not format_is_configured,
+                timeout=int(pipeline_config.get("format_timeout_seconds", 300)),
+            ),
             command=development_config.get("command", "claude"),
             model=development_config.get("model"),
             timeout=int(development_config.get("timeout_seconds", 900)),
@@ -221,6 +232,12 @@ def build_executor(
         pipeline.get("worktree_dir", pipeline.get("runs_dir", "runs")),
     )
     commands = pipeline.get("commands", {})
+    browser_config = pipeline.get("browser", {})
+    if not isinstance(browser_config, dict):
+        raise ValidationError("'pipeline.browser' must be a JSON object")
+    browser_verifier = None
+    if browser_config.get("enabled", False):
+        browser_verifier = PlaywrightBrowserVerifier(store, browser_config)
     return WorktreeExecutor(
         store,
         project_root,
@@ -231,6 +248,7 @@ def build_executor(
             "build": commands.get("build", "npm run build"),
         },
         command_timeout=int(pipeline.get("command_timeout_seconds", 1200)),
+        browser_verifier=browser_verifier,
     )
 
 
@@ -273,7 +291,7 @@ def run_command(args: argparse.Namespace) -> dict[str, Any]:
     orchestrator = Orchestrator(
         store,
         build_agents(config, config_path, store=store, task_id=task_id),
-        max_retries=int(pipeline.get("max_retries", 1)),
+        max_retries=int(pipeline.get("max_retries", 3)),
         development_validator=build_development_validator(config, config_path),
     )
     state = orchestrator.run(
@@ -316,7 +334,7 @@ def revise_command(args: argparse.Namespace) -> dict[str, Any]:
     orchestrator = Orchestrator(
         store,
         build_agents(config, config_path, store=store, task_id=args.task_id),
-        max_retries=int(pipeline.get("max_retries", 1)),
+        max_retries=int(pipeline.get("max_retries", 3)),
         development_validator=build_development_validator(config, config_path),
     )
     return orchestrator.revise(args.task_id, feedback).to_dict()

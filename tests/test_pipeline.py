@@ -229,6 +229,12 @@ class InvalidThenValidModel(DemoModelClient):
 def make_git_repo(path: Path) -> None:
     path.mkdir()
     subprocess.run(["git", "init", "-b", "main"], cwd=path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "core.autocrlf", "false"],
+        cwd=path,
+        check=True,
+        capture_output=True,
+    )
     (path / "app.txt").write_text("old\n", encoding="utf-8")
     subprocess.run(["git", "add", "app.txt"], cwd=path, check=True, capture_output=True)
     subprocess.run(
@@ -267,7 +273,7 @@ def test_invalid_patch_is_retried_and_only_valid_artifact_is_saved(tmp_path: Pat
     assert state.status == "awaiting_human_review"
     assert model.development_calls == 2
     assert model.validation_feedback is not None
-    assert "git apply --check" in model.validation_feedback["message"]
+    assert "git apply --3way" in model.validation_feedback["message"]
     saved = store.load_artifact(state, "development")
     assert saved["changes"][0]["diff"].startswith("--- a/app.txt")
 
@@ -293,12 +299,18 @@ def test_invalid_patch_is_never_saved_when_all_attempts_fail(tmp_path: Path) -> 
         development_validator=PatchValidator(project),
     )
 
-    with pytest.raises(StageExecutionError, match="git apply --check"):
+    with pytest.raises(StageExecutionError, match="git apply --3way"):
         orchestrator.run(str(requirement), TASK_ID)
 
     state = store.load_or_create(TASK_ID)
     assert state.status == "failed"
     assert state.error["stage"] == "development"
-    assert "git apply --check" in state.error["message"]
+    assert "git apply --3way" in state.error["message"]
     assert "development" not in state.artifacts
     assert not (store.run_dir(TASK_ID) / "03_code_changes.json").exists()
+
+
+def test_orchestrator_defaults_to_three_retries(tmp_path: Path) -> None:
+    orchestrator = Orchestrator(RunStore(tmp_path / "runs"), make_agents())
+
+    assert orchestrator.max_retries == 3

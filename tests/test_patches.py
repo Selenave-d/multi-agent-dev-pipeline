@@ -12,6 +12,12 @@ from dev_pipeline.patches import PatchValidator
 def make_repo(path: Path) -> None:
     path.mkdir()
     subprocess.run(["git", "init", "-b", "main"], cwd=path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "core.autocrlf", "false"],
+        cwd=path,
+        check=True,
+        capture_output=True,
+    )
     (path / "app.txt").write_text("old\n", encoding="utf-8")
     subprocess.run(["git", "add", "app.txt"], cwd=path, check=True, capture_output=True)
     subprocess.run(
@@ -58,7 +64,74 @@ def test_patch_validator_rejects_malformed_diff(tmp_path: Path) -> None:
         PatchValidator(repo).validate(artifact("not a patch"))
 
     assert error.value.code == "invalid_generated_patch"
-    assert "git apply --check" in str(error.value)
+    assert "git apply --3way" in str(error.value)
+
+
+def test_patch_validator_uses_three_way_merge_for_changed_context(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    make_repo(repo)
+    base = "ctx0\nctx1\nctx2\nctx3\nold\nafter1\nafter2\nafter3\n"
+    (repo / "app.txt").write_text(base, encoding="utf-8")
+    subprocess.run(["git", "add", "app.txt"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.test",
+            "commit",
+            "-m",
+            "base",
+        ],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    (repo / "app.txt").write_text(base.replace("old", "new"), encoding="utf-8")
+    patch = subprocess.run(
+        ["git", "diff", "--binary", "HEAD", "--"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    subprocess.run(["git", "restore", "app.txt"], cwd=repo, check=True, capture_output=True)
+    (repo / "app.txt").write_text(base.replace("ctx1", "CTX1"), encoding="utf-8")
+    subprocess.run(["git", "add", "app.txt"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.test",
+            "commit",
+            "-m",
+            "context shift",
+        ],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    direct = subprocess.run(
+        ["git", "apply", "--check", "-"],
+        cwd=repo,
+        input=patch,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert direct.returncode != 0
+    PatchValidator(repo).validate(artifact(patch))
+    assert subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout == ""
 
 
 def test_patch_validator_rejects_dirty_project(tmp_path: Path) -> None:
